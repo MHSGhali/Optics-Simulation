@@ -1,0 +1,75 @@
+name: build and test
+
+# The build is warnings-as-linter and the suite is headless, so all of this
+# runs anywhere without a display. Two platforms because this is C against
+# SDL2: the compilers disagree about warnings, and clang and gcc disagree
+# about which of them are worth having.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install SDL2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev pkg-config
+
+      - name: Install SDL2 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2 pkg-config
+
+      # `make` runs the six architectural gates before it links anything, so a
+      # layering violation fails here rather than in review.
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make test
+
+      # Both sanitizers, because the two of them catch disjoint things: asan
+      # finds the out-of-bounds read, ubsan finds the signed overflow and the
+      # misaligned load that asan is perfectly happy with. The suite is small
+      # enough that running it three times costs seconds.
+      - name: Test under AddressSanitizer
+        run: make test-asan
+
+      - name: Test under UndefinedBehaviorSanitizer
+        run: make test-ubsan
+
+      - name: Smoke-test the batch renderer
+        # A real render through the real lens, small enough to be quick. No
+        # display involved: this half of the program has never needed one.
+        run: |
+          ./opticsim still --stage rail --fstop 5 --focus 2.0 \
+              --width 96 --height 64 --spp 8 --out "$RUNNER_TEMP/rail.ppm"
+          ./opticsim still --ambient 2000 \
+              --width 96 --height 64 --spp 8 --out "$RUNNER_TEMP/amb.ppm"
+          ls -l "$RUNNER_TEMP"
+
+      - name: Smoke-test the offscreen capture
+        # Renders the viewer's own draw path with no display, which is how
+        # every picture in the README is made.
+        #
+        # Informational: it depends on SDL's dummy video driver being able to
+        # back a software renderer, which is a property of the runner image
+        # rather than of this program.
+        continue-on-error: true
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: |
+          mkdir -p "$RUNNER_TEMP/views"
+          ./opticsim --capture scene "$RUNNER_TEMP/views"
+          ./opticsim --capture ambient "$RUNNER_TEMP/views"
+          ls -l "$RUNNER_TEMP/views"

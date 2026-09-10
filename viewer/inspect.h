@@ -80,6 +80,23 @@ int  os_settings_res_h(const OsSettings *s);   /* from the sensor's aspect */
  * half-converged render. */
 bool os_settings_image_differs(const OsSettings *a, const OsSettings *b);
 
+/* ---- the document / viewport split, which is what undo operates on ----
+ *
+ * The DOCUMENT is everything that describes the photograph: the lens, the
+ * arrangement, the sensor, the sampling, and what the panel is editing. The
+ * VIEWPORT is which of the three views is on screen and which overlays are
+ * drawn -- where you are standing, not what you made.
+ *
+ * Undo is about the document. An undo that also threw you into a different
+ * view would be obeying the letter of the word and not its point.
+ *
+ * Both functions are written as "the whole struct, then the viewport back",
+ * so that adding a SETTING needs no edit here and only adding a VIEW TOGGLE
+ * does. That is the direction where forgetting is survivable: a missed toggle
+ * merely becomes undoable, where a missed setting would silently not be. */
+bool os_settings_doc_differs(const OsSettings *a, const OsSettings *b);
+void os_settings_restore_doc(OsSettings *dst, const OsSettings *src);
+
 typedef enum {
     FLD_NONE = 0,
     FLD_H_LENS, FLD_LENS, FLD_FOCAL, FLD_FNO, FLD_FOCUS,

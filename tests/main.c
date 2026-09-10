@@ -14,6 +14,7 @@ int main(void) {
     os_test_ui();
     os_test_camera();
     os_test_inspect();
+    os_test_history();
     os_test_scene3d();
     os_test_scenedesc();
     os_test_env();

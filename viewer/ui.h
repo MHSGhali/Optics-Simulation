@@ -50,6 +50,7 @@ typedef enum {
     UI_GRID,
     /* arranging the scene */
     UI_ADD_OBJECT, UI_ADD_LIGHT, UI_LIGHT_MODE, UI_DELETE, UI_SELECT_NEXT,
+    UI_UNDO, UI_REDO,
     /* the rendered image */
     UI_SAVE,
     UI_RESET,
@@ -71,7 +72,11 @@ typedef struct {
     bool        active;
 } UiButton;
 
-#define UI_MAX_BUTTONS 24
+/* Headroom, deliberately. ui_init CLAMPS to this rather than failing, so a
+ * table that outgrows it loses its last buttons with nothing said -- and the
+ * last buttons are the newest ones, which is exactly when nobody is looking
+ * for a missing control. */
+#define UI_MAX_BUTTONS 32
 
 typedef struct {
     UiButton buttons[UI_MAX_BUTTONS];
@@ -90,6 +95,7 @@ typedef struct {
     bool  rendering;         /* the image view has a render in flight */
     bool  has_selection;
     bool  ambient;           /* lit by the dome rather than by the lamps */
+    bool  can_undo, can_redo;
     bool  room_for_object, room_for_light;
     int   scene_items;       /* live objects + lights, for SELECT NEXT */
     bool  showing_rays;

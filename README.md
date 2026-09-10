@@ -51,6 +51,13 @@ through everything. A lamp's brightness is set in **lumens** — the number
 printed on a real bulb — with the radiant watts and the in-band efficacy shown
 beside it.
 
+**Every change can be taken back.** `Z` undoes, `Y` redoes. A whole drag is one
+step rather than one per pixel, and so is a run of arrow-key nudges — a step is
+a *gesture*, not a settings change. Which view you are looking at is not a
+change and is never undone: taking back an aperture edit while you are in the
+lens view leaves you in the lens view. `RESET` is undoable like anything else,
+which is the case that matters most.
+
 There is **no backdrop and no walls** — the subjects stand in empty space, and
 what is behind them is whatever the lighting says is behind them: nothing under
 lamps, the sky itself under a dome. A wall bounces light back onto the

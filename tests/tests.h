@@ -15,6 +15,7 @@ void os_test_trace(void);     /* real sequential ray tracing, Snell, iris, clipp
 void os_test_ui(void);        /* toolbar rules and the cross-section, with no window */
 void os_test_camera(void);    /* pupils, camera rays, exposure, determinism */
 void os_test_inspect(void);   /* the settings model: bounds, clamping, restarts */
+void os_test_history(void);   /* undo and redo: the stack discipline */
 void os_test_scene3d(void);   /* the scene view's projection, and depth of field */
 void os_test_scenedesc(void); /* the editable scene: ids, clamps, lumens, pairing */
 void os_test_env(void);       /* the ambient dome: lux in, closed forms out */

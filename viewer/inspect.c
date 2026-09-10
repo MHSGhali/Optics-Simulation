@@ -76,6 +76,33 @@ bool os_settings_image_differs(const OsSettings *a, const OsSettings *b) {
         || a->depth != b->depth;
 }
 
+bool os_settings_doc_differs(const OsSettings *a, const OsSettings *b) {
+    /* Everything the image depends on, plus the two that change what the
+     * program SAYS about the image without changing the image itself.
+     * Exposure is a view gain and the sharpness criterion only moves the
+     * depth-of-field numbers -- neither restarts a render, and both are
+     * edits a person would expect to be able to take back. */
+    return os_settings_image_differs(a, b)
+        || a->exposure     != b->exposure
+        || a->coc_limit_mm != b->coc_limit_mm
+        /* Selection, which os_settings_image_differs deliberately ignores.
+         * On its own it is not an edit -- but deleting an object changes it,
+         * and an undo that brought the object back without reselecting it
+         * would leave the panel editing nothing. */
+        || a->sel_obj      != b->sel_obj
+        || a->sel_light    != b->sel_light;
+}
+
+void os_settings_restore_doc(OsSettings *dst, const OsSettings *src) {
+    int  view = dst->view;
+    bool rays = dst->show_rays, spot = dst->show_spot;
+    bool grid = dst->show_grid, chrom = dst->chromatic;
+    *dst = *src;
+    dst->view = view;
+    dst->show_rays = rays; dst->show_spot = spot;
+    dst->show_grid = grid; dst->chromatic = chrom;
+}
+
 /* ---- the field list ---- */
 
 static Field head(FieldId id, const char *label) {

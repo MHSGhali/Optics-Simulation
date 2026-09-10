@@ -76,6 +76,15 @@ static const struct {
       "Step the selection through the objects and then the lamps, for when "
       "something is too small or too far away to click.", false },
 
+    { UI_UNDO,       "UNDO",     "Z",
+      "Take back the last change. A whole drag is one step, not one per "
+      "pixel. Which view you are looking at is not a change and is never "
+      "undone.", true },
+    { UI_REDO,       "REDO",     "Y",
+      "Put back what was undone. Making a new change after undoing abandons "
+      "the redo trail, because there would no longer be a state for it to "
+      "lead to.", false },
+
     { UI_SAVE,       "SAVE",     "S",
       "Write the rendered image to out/viewer.ppm, at the exposure on screen.", true },
     { UI_RESET,      "RESET",    "0",
@@ -205,6 +214,12 @@ void ui_apply_state(Toolbar *t, UiState s) {
                 b->enabled = s.scene_items > 0;
                 break;
 
+            /* Grey rather than accept a click and do nothing: an empty stack
+             * is a limit, and a control that silently does nothing reads as a
+             * broken program. */
+            case UI_UNDO: b->enabled = s.can_undo; break;
+            case UI_REDO: b->enabled = s.can_redo; break;
+
             /* Nothing to save until there is a rendered image. */
             case UI_SAVE:
                 b->enabled = (s.view == OS_VIEW_IMAGE) && s.rendering;
@@ -269,6 +284,8 @@ UiAction ui_action_for_key(char c) {
         case 'f': return UI_SPOT;
         case 'g': return UI_GRID;
         case 'e': return UI_LIGHT_MODE;
+        case 'z': return UI_UNDO;
+        case 'y': return UI_REDO;
         case '?': case '/': return UI_HELP;
         default:  return UI_NONE;
     }

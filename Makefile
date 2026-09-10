@@ -104,7 +104,8 @@ $(BUILD):
 # they pass, because the suites that need them are the ones that vanish.
 HEADLESS_VIEW := $(BUILD)/viewer_ui.o $(BUILD)/viewer_font.o \
                  $(BUILD)/viewer_status.o $(BUILD)/viewer_lensplot.o \
-                 $(BUILD)/viewer_inspect.o $(BUILD)/viewer_scene3d.o
+                 $(BUILD)/viewer_inspect.o $(BUILD)/viewer_scene3d.o \
+                 $(BUILD)/viewer_history.o
 
 $(BUILD)/run_tests: $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(TESTOBJ) $(HEADLESS_VIEW) $(LDLIBS)

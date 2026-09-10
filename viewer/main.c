@@ -34,6 +34,7 @@
 #include "draw.h"
 #include "font.h"
 #include "ui.h"
+#include "history.h"
 #include "inspect.h"
 #include "lensplot.h"
 #include "scene3d.h"
@@ -237,7 +238,36 @@ typedef struct {
     ls_real       zoom, pan_x, pan_y;
     bool          dragging;
     int           drag_x, drag_y;
+
+    /* Undo, and the state the current gesture started from.
+     *
+     * `hist_base` is refreshed at the end of every frame in which no gesture
+     * is in flight, so it always holds "the document as it was before
+     * whatever is happening now" -- including the viewport half, which is why
+     * undoing a move restores the selection you had when you started moving
+     * rather than one from three edits ago. */
+    OsHistory     hist;
+    OsSettings    hist_base;
+    /* Held-down edits. A gesture is one undo step however many settings
+     * changes it fires: a drag across the scene fires one per mouse-motion
+     * event, and an autorepeating arrow key one per repeat. */
+    bool          nudging;
 } App;
+
+/* Is an edit still in progress? Nothing is recorded while one is, so a drag
+ * is one step and not fifty. */
+static bool gesture_active(const App *a) {
+    return a->moving || a->scrubbing || a->nudging;
+}
+
+/* Close off whatever just happened: record a step if the document moved, and
+ * re-baseline. Called once per frame from the event loop, so EVERY change is
+ * caught however it was made -- there is no list of edit sites to keep in
+ * step with, which is the way this feature usually rots. */
+static void history_mark(App *a) {
+    os_history_record(&a->hist, &a->hist_base, &a->set);
+    a->hist_base = a->set;
+}
 
 static void say(App *a, StatusLevel lv, const char *fmt, ...) {
     char buf[STATUS_MAX_TEXT];
@@ -301,6 +331,11 @@ static UiState ui_state(App *a) {
 
     s.has_selection   = (a->set.sel_obj >= 0 || a->set.sel_light >= 0);
     s.ambient         = (a->set.scene.light_mode == OS_LIGHT_AMBIENT);
+    /* What the stacks hold, plus whatever this frame has not recorded yet --
+     * so UNDO is live the moment a change is made, not one frame later. */
+    s.can_undo        = os_history_can_undo(&a->hist)
+                        || os_settings_doc_differs(&a->hist_base, &a->set);
+    s.can_redo        = os_history_can_redo(&a->hist);
     s.room_for_object = a->set.scene.nobj < OS_MAX_OBJECTS;
     s.room_for_light  = a->set.scene.nlit < OS_MAX_LIGHTS;
     s.scene_items     = os_scenedesc_count_objects(&a->set.scene)
@@ -441,6 +476,42 @@ static void dispatch(App *a, UiAction act) {
                        a->set.sel_light = os_scenedesc_next_light(&a->set.scene, 0); }
             }
             a->s3_stale = true;
+            return;
+        }
+
+        case UI_UNDO:
+        case UI_REDO: {
+            /* Close the current frame's edit first, so pressing undo right
+             * after a change steps back over THAT change rather than over the
+             * one before it. */
+            history_mark(a);
+            bool ok = (act == UI_UNDO) ? os_history_undo(&a->hist, &a->set)
+                                       : os_history_redo(&a->hist, &a->set);
+            if (!ok) {
+                say(a, STATUS_WARN, act == UI_UNDO ? "NOTHING TO UNDO"
+                                                   : "NOTHING TO REDO");
+                return;
+            }
+            /* The restored ids may name tombstones -- undoing an ADD removes
+             * the object the panel was editing. */
+            if (a->set.sel_obj >= 0
+                && (a->set.sel_obj >= a->set.scene.nobj
+                    || !a->set.scene.obj[a->set.sel_obj].alive))
+                a->set.sel_obj = -1;
+            if (a->set.sel_light >= 0
+                && (a->set.sel_light >= a->set.scene.nlit
+                    || !a->set.scene.lit[a->set.sel_light].alive))
+                a->set.sel_light = -1;
+            a->sel_row = -1;
+            a->is_typing = false; a->typing[0] = '\0';
+            apply(a);
+            /* Re-baseline WITHOUT recording, or the step just taken would be
+             * pushed straight back on as a new edit and undo would toggle
+             * between two states for ever. */
+            a->hist_base = a->set;
+            say(a, STATUS_INFO, act == UI_UNDO ? "UNDID  %d BACK, %d FORWARD"
+                                               : "REDID  %d BACK, %d FORWARD",
+                a->hist.nundo, a->hist.nredo);
             return;
         }
 
@@ -641,6 +712,12 @@ int os_viewer_main(int argc, char **argv) {
     a.plot_stale = true;
     a.s3_stale   = true;
 
+    /* The starting state is the baseline, not a step: there is nothing before
+     * it to go back to. Undo simply stays greyed out until something moves. */
+    if (!os_history_init(&a.hist))
+        say(&a, STATUS_WARN, "NO MEMORY FOR UNDO; EVERYTHING ELSE STILL WORKS");
+    a.hist_base = a.set;
+
     say(&a, STATUS_INFO, "1 SCENE   2 LENS   3 IMAGE   ? FOR KEYS");
 
     bool helping = false;
@@ -706,11 +783,25 @@ int os_viewer_main(int argc, char **argv) {
                         int step = (k == SDLK_UP || k == SDLK_DOWN) ? 10 : 1;
                         double nv = f->is_enum ? f->value + dir
                                   : os_inspect_scrub(f, f->value, dir * step);
+                        /* Held down, an arrow autorepeats. Marking it as a
+                         * gesture until the key comes up makes the whole run
+                         * one undo step -- otherwise a second of holding it
+                         * fills the stack and undo becomes a key you have to
+                         * hold down too. */
+                        a.nudging = true;
                         if (os_inspect_set(&a.set, f->id, nv)) apply(&a);
                         break;
                     }
 
                     if (k < 128) try_action(&a, ui_action_for_key((char)k), &helping);
+                    break;
+                }
+
+                case SDL_KEYUP: {
+                    SDL_Keycode k = e.key.keysym.sym;
+                    if (k == SDLK_UP || k == SDLK_DOWN
+                     || k == SDLK_LEFT || k == SDLK_RIGHT)
+                        a.nudging = false;
                     break;
                 }
 
@@ -888,12 +979,20 @@ int os_viewer_main(int argc, char **argv) {
             }
         }
 
+        /* One place, once a frame: whatever the events did, if no gesture is
+         * still in flight it becomes at most one undo step. There is no list
+         * of edit sites to keep in step with, which is how this feature
+         * usually rots -- a new control gets added and silently is not
+         * undoable. */
+        if (!gesture_active(&a)) history_mark(&a);
+
         draw_frame(&a, helping);
         SDL_Delay(16);
     }
 
     SDL_AtomicSet(&a.R.quit, 1);
     if (a.R.thread) SDL_WaitThread(a.R.thread, NULL);
+    os_history_free(&a.hist);
     renderer_teardown(&a.R);
     if (a.R.lock) SDL_DestroyMutex(a.R.lock);
     if (a.tex) SDL_DestroyTexture(a.tex);
@@ -987,6 +1086,9 @@ static int run_capture(const char *subject, const char *dir) {
     }
     a.plot_stale = true;
     a.s3_stale   = true;
+    /* No history in a capture -- but the baseline still has to match, or the
+     * UNDO button would draw as available in every checked-in screenshot. */
+    a.hist_base  = a.set;
 
     if (a.set.view == OS_VIEW_IMAGE) {
         /* Rendered on this thread: capture has no interactivity to preserve,

@@ -357,7 +357,7 @@ this codebase expects, and the four commands to run before pushing.
 
 ### Borrowed code
 
-The renderer core is vendored from the sibling [Light-Simulation](../Light-Simulation) — MIT,
+The renderer core is vendored from the sibling [Light-Simulation](https://github.com/MHSGhali/Light-Simulation) — MIT,
 same author — rather than rewritten: spectra, CIE colour, geometry, BVH meshes, BSDFs, lights,
 scene traversal, film and threading. Every borrowed file carries a provenance banner naming the
 commit it came from and exactly what was changed, and `check-vendor` fails the build if one

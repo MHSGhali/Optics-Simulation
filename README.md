@@ -336,7 +336,7 @@ precisely how you would erase the chromatic aberration the lens exists to produc
 
 ### Invariants the build enforces
 
-Four `grep` gates run before every test. Each guards a bug whose symptom is *a picture that
+Six `grep` gates run before every test. Each guards a bug whose symptom is *a picture that
 looks right*, which is the only kind worth spending a build step on.
 
 | gate | what it refuses |
@@ -345,9 +345,15 @@ looks right*, which is the only kind worth spending a build step on.
 | `check-lens-purity` | dispersion escaping the lens layer into the transport core |
 | `check-sdl-purity` | SDL reaching any module the headless tests link |
 | `check-scale-purity` | the sensor seeing the render grid instead of the photosite |
+| `check-photometry-purity` | a lumen anywhere but where lights are authored |
+| `check-vendor` | a borrowed file without its provenance banner |
 
 They match code, not prose: a line whose first non-space character is `*` or `/` is skipped, so
-explaining *why* auto-exposure was removed does not trip the gate that removed it.
+explaining *why* auto-exposure was removed does not trip the gate that removed it. Exemptions
+are named files rather than loosened patterns, so the next one has to be argued for too.
+
+[`CLAUDE.md`](CLAUDE.md) collects these alongside the per-module invariants, the conventions
+this codebase expects, and the four commands to run before pushing.
 
 ### Borrowed code
 

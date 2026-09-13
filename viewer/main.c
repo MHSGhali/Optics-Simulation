@@ -385,7 +385,8 @@ static UiState ui_state(App *a) {
      * dragging further would walk the number past a build that then refuses,
      * which reads as a broken program rather than as a limit. A design that
      * scales freely reports no range and keeps the full 12-400. */
-    s.focal_mm     = a->set.focal_mm; s.focal_min_mm = 12.0;  s.focal_max_mm = 400.0;
+    s.focal_mm     = a->set.focal_mm;
+    s.focal_min_mm = OS_FOCAL_MIN_MM; s.focal_max_mm = OS_FOCAL_MAX_MM;
     if (a->R.built)
         os_lens_focal_range_mm(&a->R.cam.lens, &s.focal_min_mm, &s.focal_max_mm);
     /* fno_min comes from the LENS, not from a literal. Hard-coded at 1.0 it

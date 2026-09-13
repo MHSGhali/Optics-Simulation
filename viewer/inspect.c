@@ -148,7 +148,7 @@ int os_inspect_fields(const OsSettings *s, const OsLens *L,
      * so far. os_inspect_set clamps to the same pair, which is why the lens is
      * threaded in here at all. */
     {
-        ls_real fmin = 12.0, fmax = 400.0;
+        ls_real fmin = OS_FOCAL_MIN_MM, fmax = OS_FOCAL_MAX_MM;
         if (L) os_lens_focal_range_mm(L, &fmin, &fmax);
         PUSH(val(FLD_FOCAL,  "FOCAL",  "MM", s->focal_mm, fmin, fmax, true));
     }
@@ -440,7 +440,7 @@ bool os_inspect_set(OsSettings *s, FieldId id, double v) {
             return memcmp(&before, l, sizeof before) != 0;
         }
         case FLD_FOCAL: {
-            double nv = clampd(v, 12.0, 400.0);
+            double nv = clampd(v, OS_FOCAL_MIN_MM, OS_FOCAL_MAX_MM);
             if (nv == s->focal_mm) return false;
             s->focal_mm = nv; return true;
         }

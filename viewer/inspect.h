@@ -152,6 +152,24 @@ bool os_inspect_set(OsSettings *s, FieldId id, double v);
  * ranges, linear otherwise. */
 double os_inspect_scrub(const Field *f, double v, int dx);
 
+/* ---- the focal range the CONTROL offers ----
+ *
+ * Here because inspect.h owns "one place a setting's bounds live", and this one
+ * had drifted into three: the field list, os_inspect_set's clamp, and the
+ * viewer's button limits. Three copies of a bound is the exact failure this
+ * module's invariant exists to prevent -- a value that clamps when dragged and
+ * not when typed.
+ *
+ * 2.5 mm is far shorter than the shipped designs can COVER: the prescriptions
+ * are reached at other focal lengths by scaling, so a 100 mm doublet at 2.5 mm
+ * covers a 0.5 mm image circle on a 43 mm frame, and all but the middle of the
+ * picture is aberration. That is honest output rather than a reason to forbid
+ * the setting -- os_lens_distortion_pct and the COVERS row say exactly how bad
+ * it is, which is the point. A design with a range of its own (a zoom) clamps
+ * tighter, through os_lens_design_focal_range. */
+#define OS_FOCAL_MIN_MM   2.5
+#define OS_FOCAL_MAX_MM 400.0
+
 /* Would `c` be taken as part of a typed value for this field?
  *
  * THE ONE PLACE THAT DECIDES, and it has to be, because two callers depend on

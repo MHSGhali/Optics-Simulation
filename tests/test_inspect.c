@@ -195,6 +195,82 @@ void os_test_inspect(void) {
         }
     }
 
+    SECTION("inspect: the focal control's range is one the lens can honour");
+    {
+        /* The bound lives in ONE place now. It had drifted into three -- the
+         * field list, os_inspect_set's clamp, and the viewer's button limits --
+         * which is the exact failure inspect.h's invariant is written against:
+         * a value that clamps when dragged and not when typed. */
+        OsSettings s;
+        os_settings_default(&s);
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int row = -1;
+        for (int i = 0; i < n; ++i) if (f[i].id == FLD_FOCAL) row = i;
+        CHECK(row >= 0);
+        CHECK_NEAR(f[row].lo, OS_FOCAL_MIN_MM, 1e-12);
+        CHECK_NEAR(f[row].hi, OS_FOCAL_MAX_MM, 1e-12);
+
+        /* Both ends are reachable, and nothing beyond them is. */
+        CHECK(os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MIN_MM));
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MIN_MM, 1e-12);
+        os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MIN_MM * 0.1);
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MIN_MM, 1e-12);
+        CHECK(os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MAX_MM));
+        os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MAX_MM * 10.0);
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MAX_MM, 1e-12);
+
+        /* ---- and the range is one the LENS can actually be built at ----
+         *
+         * A control whose floor the tracer refuses is a trap: the panel would
+         * offer a setting that blanks the window. Every design that scales has
+         * to build at both ends, and produce a lens that passes light rather
+         * than merely constructing. 2.5 mm is a long way outside what these
+         * prescriptions COVER -- a 100 mm doublet scaled that far covers half a
+         * millimetre on a 43 mm frame -- but covering badly and failing to
+         * build are different things, and only the second is a bug. */
+        char why[256];
+        static const OsPrescriptionId SCALED[3] = {
+            OS_LENS_THIN, OS_LENS_SINGLET_100, OS_LENS_ACHROMAT_100 };
+        for (int k = 0; k < 3; ++k) {
+            for (int end = 0; end < 2; ++end) {
+                ls_real f_mm = end ? OS_FOCAL_MAX_MM : OS_FOCAL_MIN_MM;
+                OsLens L;
+                CHECK(os_lens_build(&L, SCALED[k], f_mm, 5.0, why, sizeof why));
+                CHECK_NEAR(L.efl_mm, f_mm, 1e-9);
+                CHECK(os_lens_focus(&L, 2.5));
+
+                /* Light gets through on axis, which is the difference between
+                 * a lens that covers poorly and a black frame. */
+                ls_real spot = os_lens_spot_mm(&L, 2.5, 0.0, 11);
+                CHECK(isfinite(spot));
+                CHECK(spot > 0.0);
+            }
+        }
+
+        /* At the floor the coverage really is that bad, and the panel says so
+         * rather than hiding it -- which is the reason the setting is allowed
+         * at all. */
+        OsLens tiny;
+        CHECK(os_lens_build(&tiny, OS_LENS_ACHROMAT_100, OS_FOCAL_MIN_MM, 5.0,
+                            why, sizeof why));
+        ls_real half_diag = 0.5 * sqrt(36.0 * 36.0 + 24.0 * 24.0);
+        NOTE("at %.1f mm the achromat covers %.2f mm against a %.1f mm frame "
+             "corner -- %.0fx outside", OS_FOCAL_MIN_MM,
+             tiny.image_circle_mm * 0.5, half_diag,
+             half_diag / (tiny.image_circle_mm * 0.5));
+        CHECK(half_diag / (tiny.image_circle_mm * 0.5) > 50.0);
+
+        /* A design with a range of its own still clamps tighter than the
+         * control does -- the zoom cannot be dialled to 2.5 mm however far the
+         * slider goes. */
+        ls_real zmin = 0.0, zmax = 0.0;
+        CHECK(os_lens_design_focal_range(OS_LENS_ZOOM_RETRO, &zmin, &zmax));
+        CHECK(zmin > OS_FOCAL_MIN_MM);
+        CHECK(zmax < OS_FOCAL_MAX_MM);
+    }
+
     SECTION("inspect: which characters a row will take as typed input");
     {
         /* The predicate the viewer's key handler and text handler BOTH consult,

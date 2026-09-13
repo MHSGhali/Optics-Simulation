@@ -68,3 +68,6 @@ build/
 # `make docs-images` from the app's own draw path, and the README points at
 # them, so they have to survive a clone.
 out/
+
+# macOS Finder drops these into any directory anyone opens.
+.DS_Store

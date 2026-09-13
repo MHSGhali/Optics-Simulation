@@ -63,8 +63,21 @@ ls_real os_trace_radiance(const Scene *sc, const OsEnv *env, Ray ray,
         if (!ls_scene_intersect(sc, &ray, &hit)) {
             /* Escaped, so the sky is what is out there -- and it is the ONLY
              * thing an escaping ray can see, which is what makes the dome cost
-             * nothing to look up. */
-            if (have_env) {
+             * nothing to look up.
+             *
+             * EXCEPT ON THE CAMERA RAY, which returns black instead. depth 0
+             * is the ray the film sent, so this branch at depth 0 is the
+             * camera pointed at nothing at all.
+             *
+             * A dome bright enough to light a scene is far brighter than
+             * everything it lights -- rho is below one, so every subject is
+             * darker than the sky behind it -- and the sky is most of the
+             * frame, so photographing it drives the exposure and leaves no
+             * setting where the subjects are right and the background is not
+             * clipped white. See env.h. The LIGHTING is untouched: NEE toward
+             * the dome and every indirect bounce still collect it in full,
+             * which is why this test is on `depth` and not on `have_env`. */
+            if (have_env && depth > 0) {
                 ls_real w = prev_was_delta
                     ? 1.0
                     : mis2(prev_pdf, prev_env_pdf / (ls_real)nstrat);

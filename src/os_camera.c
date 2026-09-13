@@ -21,8 +21,19 @@ bool os_camera_build(OsCamera *c, OsPrescriptionId lens, ls_real efl_mm,
      * square crop of the format rather than a stretched frame. */
     c->sensor_h_mm = sensor_w_mm * (ls_real)h / (ls_real)w;
 
-    os_camera_look_at(c, v3(0, 0, 0), v3(0, 0, 1), v3(0, 1, 0));
-    os_camera_refresh(c);
+    /* Looking down -z, which is where every scene in this program is. It used
+     * to be +z, harmlessly -- every caller aims the camera immediately -- but a
+     * default that points away from the subject is a trap for the one that
+     * forgets. */
+    os_camera_look_at(c, v3(0, 0, 0), v3(0, 0, -1), v3(0, 1, 0));
+
+    /* NO PUPIL SCAN HERE. It is ~74 000 lens traces and every caller changes
+     * the focus on the next line, which invalidates it -- so building it now
+     * is a build thrown away, on the viewer's interactive path. The camera
+     * still works without it: the trivial bound is the whole rear element,
+     * which samples correctly and merely wastes rays. Call os_camera_refresh
+     * once the lens has stopped moving. */
+    os_pupil_init_trivial(&c->pupil, &c->lens);
     return true;
 }
 

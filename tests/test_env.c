@@ -95,11 +95,18 @@ void os_test_env(void) {
         os_stage_free(&st);
     }
 
-    SECTION("env: an escaping ray sees the sky and nothing else");
+    SECTION("env: the camera does not photograph the dome, but everything is still lit by it");
     {
-        Scene empty;
-        memset(&empty, 0, sizeof empty);
-
+        /* TWO claims that have to hold together, which is why they are in one
+         * section: the sky is not in the picture, and the sky still lights the
+         * picture. Either alone is easy and useless -- switching the dome off
+         * satisfies the first, and the old behaviour satisfied the second.
+         *
+         * The reason for the first is exposure. A dome bright enough to light
+         * a scene outshines everything it lights, because rho is below one; in
+         * shot it fills most of the frame, drives the exposure, and leaves no
+         * setting at which the subjects are right and the background is not
+         * clipped. See env.h. */
         OsEnv env;
         memset(&env, 0, sizeof env);
         env.on = true;
@@ -107,21 +114,53 @@ void os_test_env(void) {
         ls_real le = ls_spectrum_at(&env.le, LAMBDA);
         CHECK(le > 0.0);
 
-        /* Empty space: every direction is sky, and the camera ray is the
-         * `prev_was_delta` case, so it takes the whole of it unweighted. */
+        /* ---- not photographed ----
+         * Empty space in every direction, and the camera ray -- depth 0 -- has
+         * to come back with nothing whatever the dome is doing. */
+        Scene empty;
+        memset(&empty, 0, sizeof empty);
         for (int i = 0; i < 8; ++i) {
             ls_real t = LS_TWO_PI * (ls_real)i / 8.0;
             vec3 dir = v3norm(v3(cos(t), 0.3, sin(t)));
-            ls_real L = mean_radiance(&empty, &env, v3(0,0,0), dir, LAMBDA, 4, 6);
-            CHECK(fabs(L - le) <= le * 1e-12);
+            CHECK(mean_radiance(&empty, &env, v3(0,0,0), dir, LAMBDA, 4, 6) == 0.0);
         }
-
-        /* And with no dome, empty space is black rather than whatever was
-         * last in the buffer. */
+        /* Which is the same answer a dome that is OFF gives, and the same
+         * answer no dome at all gives -- the background is black in all three
+         * cases, and that is the point of the change. */
         OsEnv off = env; off.on = false;
-        CHECK(mean_radiance(&empty, &env, v3(0,0,0), v3(0,0,-1), LAMBDA, 1, 6) > 0.0);
-        CHECK(mean_radiance(&empty, &off, v3(0,0,0), v3(0,0,-1), LAMBDA, 4, 6) == 0.0);
+        CHECK(mean_radiance(&empty, &off,  v3(0,0,0), v3(0,0,-1), LAMBDA, 4, 6) == 0.0);
         CHECK(mean_radiance(&empty, NULL, v3(0,0,0), v3(0,0,-1), LAMBDA, 4, 6) == 0.0);
+
+        /* ---- and still lighting ----
+         * A white Lambertian plane under the same dome. The camera ray HITS
+         * it, so the dome reaches it by every path that is not the first one:
+         * next-event estimation toward the sky at that vertex, and any bounce
+         * that escapes afterwards. The closed form for a Lambertian under a
+         * uniform dome is exactly rho * L, and nothing about that moved. */
+        Material m[1];
+        memset(m, 0, sizeof m);
+        m[0].bsdf.kind = LS_BSDF_LAMBERT;
+        m[0].bsdf.rho  = ls_spectrum_const(0.6);
+
+        Prim p[1];
+        memset(p, 0, sizeof p);
+        p[0].kind = LS_PRIM_PLANE;
+        p[0].c = v3(0.0, -1.0, 0.0); p[0].n = v3(0.0, 1.0, 0.0);
+        p[0].mat_id = 0; p[0].light_id = -1; p[0].mesh_id = -1;
+
+        Scene ground;
+        memset(&ground, 0, sizeof ground);
+        ground.prims = p; ground.nprims = 1;
+        ground.mats  = m; ground.nmats  = 1;
+
+        ls_real lit = mean_radiance(&ground, &env, v3(0.0, 2.0, 0.0),
+                                    v3(0.0, -1.0, 0.0), LAMBDA, 4000, 2);
+        NOTE("a 0.6 plane under a %.1f dome returns %.4f, closed form %.4f",
+             le, lit, 0.6 * le);
+        CHECK_NEAR(lit, 0.6 * le, 2e-3);
+        /* Nonzero by a wide margin, so "black background" cannot be passing by
+         * having quietly switched the dome off. */
+        CHECK(lit > le * 0.5);
     }
 
     SECTION("env: a grey plane under a dome returns exactly rho * L");
@@ -220,15 +259,22 @@ void os_test_env(void) {
         CHECK(b < a * 0.25);
     }
 
-    SECTION("env: a subject under the dome is darker than the dome behind it");
+    SECTION("env: a subject under the dome returns less than the dome puts on it");
     {
-        /* The presets have no backdrop, so what is behind a subject IS the
-         * sky. A Lambertian surface can only ever return rho * L with
-         * rho < 1, so every subject must come out as a silhouette against
-         * it. Getting this backwards -- subjects brighter than the sky --
-         * is the visible symptom of a dome that is too dim, of light being
-         * counted twice on the way out of a surface, or of an "ambient
-         * term" added to shading instead of traced. */
+        /* A Lambertian surface can only ever return rho * L with rho < 1, so
+         * no subject can be brighter than the sky lighting it. Getting this
+         * backwards is the visible symptom of light being counted twice on the
+         * way out of a surface, or of an "ambient term" added to shading
+         * instead of traced.
+         *
+         * MEASURED AGAINST THE DOME ITSELF, not against the background. This
+         * section used to photograph a patch of empty sky and compare with
+         * that, which worked only because the camera could see the dome; it
+         * cannot any more, and it should not -- the black behind these
+         * subjects is the whole point of the change. The dome's radiance is
+         * known exactly, from the description it was built from, so comparing
+         * with the number is both simpler and stricter than comparing with a
+         * traced estimate of it. */
         OsSceneDesc d;
         os_scenedesc_preset(&d, OS_STAGE_DEPTH_RAIL);
         d.light_mode  = OS_LIGHT_AMBIENT;
@@ -236,9 +282,13 @@ void os_test_env(void) {
         OsStage st;
         CHECK(os_scenedesc_build(&d, &st));
 
-        ls_real sky = mean_radiance(&st.scene, &st.env, v3(0,0,0),
-                                    v3norm(v3(0.0, 0.6, -1.0)), LAMBDA, 8, 8);
-        CHECK(fabs(sky - ls_spectrum_at(&st.env.le, LAMBDA)) <= sky * 1e-12);
+        ls_real sky = ls_spectrum_at(&st.env.le, LAMBDA);
+        CHECK(sky > 0.0);
+
+        /* And the background really is black now, in the same scene, on a ray
+         * aimed over the targets' heads. */
+        CHECK(mean_radiance(&st.scene, &st.env, v3(0,0,0),
+                            v3norm(v3(0.0, 0.6, -1.0)), LAMBDA, 8, 8) == 0.0);
 
         for (int i = 0; i < d.nobj; ++i) {
             if (!d.obj[i].alive || d.obj[i].kind != OS_OBJ_SPHERE) continue;
@@ -246,8 +296,9 @@ void os_test_env(void) {
             vec3 dir = v3norm(d.obj[i].centre);
             ls_real L = mean_radiance(&st.scene, &st.env, v3(0,0,0), dir,
                                       LAMBDA, 20000, 8);
-            NOTE("%-5s returns %.5f against a sky of %.5f (%.2f)",
+            NOTE("%-5s returns %.5f of a sky of %.5f (%.2f)",
                  d.obj[i].name, (double)L, (double)sky, (double)(L / sky));
+            /* Lit, and never more than the sky that lit it. */
             CHECK(L > 0.0);
             CHECK(L < sky);
         }

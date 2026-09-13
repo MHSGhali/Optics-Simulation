@@ -17,6 +17,26 @@
  *   it has to be a separate sampling strategy in the estimator rather than
  *   one more entry in the light array.
  *
+ * IT LIGHTS THE SCENE AND IS NOT PHOTOGRAPHED
+ *   With one exception to the above: the CAMERA ray does not see it. A ray
+ *   that leaves the film, misses everything and escapes returns black, while
+ *   every ray after the first still collects the dome in full.
+ *
+ *   The reason is that a dome bright enough to light a scene is far brighter
+ *   than anything it lights. A Lambertian surface returns rho times what falls
+ *   on it and rho is below one, so with the sky in shot every subject is a
+ *   silhouette against a blown white field -- and worse, that field is most of
+ *   the frame, so it drives the exposure and there is no setting at which the
+ *   subjects are correctly exposed AND the background is not clipped. The
+ *   backdrop went for the same reason a wall did.
+ *
+ *   Nothing about the LIGHTING changes. Next-event estimation toward the dome
+ *   is untouched, every indirect bounce still ends on it, and a surface under
+ *   the sky returns exactly what it did before -- which the tests check
+ *   against the closed form rather than against the picture. What changes is
+ *   only what the camera records when it is pointed at nothing, and pointed at
+ *   nothing a camera should record nothing.
+ *
  * WHY NOT A HUGE EMISSIVE SPHERE
  *   Because that is the same picture with worse numbers. A sphere large
  *   enough to read as a sky is nearly all outside any shading point's

@@ -103,15 +103,40 @@ typedef struct {
     ls_real     design_efl_mm; /* what the design is nominally; checked       */
     ls_real     design_fno;    /* widest aperture the design supports         */
     ls_real     image_circle_mm; /* diameter it covers at the design focal    */
+
+    /* ---- a design may be a FAMILY rather than a fixed table ----
+     *
+     * A ZOOM is not one lens. Its groups sit at a separation the ring moves,
+     * and every separation is a different design with a different focal
+     * length, different aberrations and different distortion. So the surface
+     * list becomes a function of one mechanical number, and `param` in
+     * os_prescription() is that number.
+     *
+     * Fixed designs leave `parametric` false and are reached at any focal
+     * length by SCALING, which is a real optical operation -- a scaled design
+     * has identical angular behaviour -- and is why they carry no focal range.
+     * A parametric one cannot be scaled: its separation already sets its focal
+     * length, and it is only honest over the span its mechanism reaches. */
+    bool        parametric;
+    ls_real     param_min, param_max;    /* the mechanism's travel            */
+    ls_real     focal_min_mm;            /* what that travel delivers, and    */
+    ls_real     focal_max_mm;            /* 0 for a design that scales freely */
 } OsPrescription;
 
 typedef enum {
-    OS_LENS_THIN = 0,      /* one ideal surface: no aberration, for the       */
-                           /* exposure tests, which must not be perturbed     */
-                           /* by anything optical                             */
+    OS_LENS_THIN = 0,      /* sphere into index 2, then a plano: exactly      */
+                           /* 100 mm at every wavelength, for the exposure    */
+                           /* tests. Ideal in COLOUR only -- one spherical    */
+                           /* surface is not aplanatic, and this leaves more  */
+                           /* spherical aberration than the achromat does     */
     OS_LENS_SINGLET_100,   /* equiconvex N-BK7, f = 100 mm: the chromatic     */
                            /* control -- it is SUPPOSED to fringe             */
     OS_LENS_ACHROMAT_100,  /* Fraunhofer N-BK7 + F2 doublet, f = 100 mm       */
+    OS_LENS_ZOOM_RETRO,    /* a RETROFOCUS ZOOM: a negative doublet, the stop, */
+                           /* a positive doublet. The separation sets the      */
+                           /* focal length, so this is the one design where    */
+                           /* the focal control moves glass rather than        */
+                           /* rescaling a fixed lens. 45-100 mm.               */
     OS_LENS_COUNT
 } OsPrescriptionId;
 
@@ -121,7 +146,7 @@ typedef enum {
  * to make thread-safe and no pointer into a static for a caller to scribble
  * on. A prescription is under a kilobyte and is fetched once per lens build,
  * never in a render loop. */
-bool os_prescription(OsPrescriptionId id, OsPrescription *out);
+bool os_prescription(OsPrescriptionId id, ls_real param, OsPrescription *out);
 
 const char *os_prescription_name(OsPrescriptionId id);
 

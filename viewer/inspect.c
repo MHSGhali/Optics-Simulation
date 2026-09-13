@@ -8,8 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const LENS_NAMES[]  = { "IDEAL", "SINGLET", "ACHROMAT" };
-static const char *const STAGE_NAMES[] = { "RAIL", "BOKEH" };
+static const char *const LENS_NAMES[]  = { "IDEAL", "SINGLET", "ACHROMAT", "ZOOM" };
+static const char *const STAGE_NAMES[] = { "RAIL", "RING", "BOKEH", "GRID" };
 static const char *const OBJ_NAMES[]   = { "SPHERE", "PLANE" };
 static const char *const LIT_NAMES[]   = { "SPHERE", "RECT" };
 static const char *const MODE_NAMES[]  = { "LAMPS", "AMBIENT" };
@@ -144,7 +144,14 @@ int os_inspect_fields(const OsSettings *s, const OsLens *L,
 
     PUSH(head(FLD_H_LENS, "LENS"));
     PUSH(en(FLD_LENS, "DESIGN", s->lens, LENS_NAMES, OS_LENS_COUNT));
-    PUSH(val(FLD_FOCAL,  "FOCAL",  "MM", s->focal_mm, 12.0, 400.0, true));
+    /* Bounded by the DESIGN when it has a range -- a zoom's groups only travel
+     * so far. os_inspect_set clamps to the same pair, which is why the lens is
+     * threaded in here at all. */
+    {
+        ls_real fmin = 12.0, fmax = 400.0;
+        if (L) os_lens_focal_range_mm(L, &fmin, &fmax);
+        PUSH(val(FLD_FOCAL,  "FOCAL",  "MM", s->focal_mm, fmin, fmax, true));
+    }
     PUSH(val(FLD_FNO,    "APERTURE", "F/", s->fno, 1.0, 45.0, true));
     PUSH(val(FLD_FOCUS,  "FOCUS",  "M",  s->focus_m, 0.15, 1000.0, true));
     PUSH(ival(FLD_BLADES, "BLADES", "",  s->blades, 0, 14, false));
@@ -246,6 +253,12 @@ int os_inspect_fields(const OsSettings *s, const OsLens *L,
         PUSH(ro(FLD_D_EFL,   "FOCAL",    "MM", L->efl_mm));
         PUSH(ro(FLD_D_HFOV,  "H FIELD",  "DEG",
                 2.0 * atan2(s->sensor_w_mm * 0.5, L->efl_mm) * 180.0 / LS_PI));
+        /* The f-number the lens ACTUALLY passes, which is not always the one
+         * the APERTURE row above asked for: os_lens_set_fnumber clamps to the
+         * mechanical bore and reports what it reached. Without this row the
+         * clamp is silent -- the control keeps moving, the picture and the
+         * exposure do not, and PUPIL sitting still is the only clue. */
+        PUSH(ro(FLD_D_FNO,   "SHOOTING AT", "", L->f_number));
         PUSH(ro(FLD_D_EP,    "PUPIL",    "MM", 2.0 * L->ep_semi_ap_mm));
         /* The f-stop / T-stop gap: real transmitted light, not geometry. */
         PUSH(ro(FLD_D_TSTOP, "T-STOP",   "T/",
@@ -257,6 +270,23 @@ int os_inspect_fields(const OsSettings *s, const OsLens *L,
         PUSH(ro(FLD_D_COLOUR, "COLOUR ERR", "%",
                 100.0 * (os_lens_efl_at(L, OS_LINE_F)
                        - os_lens_efl_at(L, OS_LINE_C)) / L->efl_mm));
+        /* Distortion at the frame CORNER, which is where it is largest and
+         * the only place anyone looks for it. Beside COLOUR ERR because it is
+         * the same kind of row: an aberration reduced to one signed number, so
+         * swapping the design moves it visibly instead of requiring a squint.
+         *
+         * Positive is pincushion, negative barrel. It is the only aberration
+         * here that does not blur anything -- it moves the image point rather
+         * than spreading it -- which is why it needs its own number and cannot
+         * be read off the SPOT row. */
+        {
+            ls_real sh = s->sensor_w_mm * (ls_real)os_settings_res_h(s)
+                                        / (ls_real)s->res_w;
+            ls_real half_diag = 0.5 * sqrt(s->sensor_w_mm * s->sensor_w_mm
+                                         + sh * sh);
+            PUSH(ro(FLD_D_DISTORT, "DISTORTION", "%",
+                    os_lens_distortion_pct(L, half_diag)));
+        }
         PUSH(ro(FLD_D_COC,   "BLUR AT 6M", "MM", os_lens_coc_mm(L, 6.0)));
         PUSH(ro(FLD_D_COVER, "COVERS",   "MM", L->image_circle_mm));
         /* Where the sharp slab actually falls, solved from this lens rather
@@ -484,15 +514,55 @@ double os_inspect_scrub(const Field *f, double v, int dx) {
     if (f->logarithmic) {
         /* A fixed fraction per pixel, so a drag covers the same number of
          * STOPS wherever it starts. 0.6 % per pixel puts a full stop at about
-         * 115 px of travel, which is a comfortable gesture. */
-        double nv = (v > 1e-12 ? v : f->lo) * pow(1.006, (double)dx);
-        return clampd(nv, f->lo, f->hi);
+         * 115 px of travel, which is a comfortable gesture.
+         *
+         * ZERO IS NOT ON A LOGARITHMIC SCALE, and the row needs a bottom that
+         * is not it. Two rows here -- a lamp's FLUX and the sky's AMBIENT --
+         * are declared with lo = 0, and a multiplicative step cannot climb off
+         * zero: drag one far enough left and the value underflowed to exactly
+         * 0, after which every further drag multiplied 0 by something and left
+         * it there. The row was stuck until someone clicked it and typed a
+         * number, which is not a thing anyone would guess.
+         *
+         * So the bottom of a zero-floored log row is a millionth of its top --
+         * twenty stops down, which reads as off and climbs straight back. A
+         * lamp that is genuinely OFF is still one typed 0 away, and typing it
+         * is the honest way to say so. */
+        double bottom = f->lo > 0.0 ? f->lo : f->hi * 1e-6;
+        double base = v > bottom ? v : bottom;
+        return clampd(base * pow(1.006, (double)dx), bottom, f->hi);
     }
-    /* Integer-valued rows step one per few pixels rather than by a fraction of
-     * their span, or blade count would need a 200-pixel drag to move by one. */
-    if (f->hi - f->lo <= 32.0)
-        return clampd(v + (double)dx * 0.08, f->lo, f->hi);
+    /* Integer-valued rows step by whole units rather than by a fraction of
+     * their span, or blade count would need a 200-pixel drag to move by one.
+     *
+     * Keyed on `integral`, and NOT on the span, which is what it used to be:
+     * `hi - lo <= 32` caught every narrow CONTINUOUS row as well -- the blade
+     * curvature and the three object colour channels, all of them 0 to 1,
+     * which a 0.08-per-pixel step crosses end to end in twelve pixels. There
+     * was no fine-tuning an object's colour at all. The floor keeps the fixed
+     * step for narrow rows while letting a wide one (were there a
+     * non-logarithmic integer row that wide) scale with its span. */
+    if (f->integral) {
+        double step = (f->hi - f->lo) * 0.0025;
+        if (step < 0.08) step = 0.08;
+        return clampd(v + (double)dx * step, f->lo, f->hi);
+    }
     return clampd(v + (double)dx * (f->hi - f->lo) * 0.0025, f->lo, f->hi);
+}
+
+bool os_inspect_accepts_char(const Field *f, char c) {
+    /* Nothing types into a row that holds no editable number. An enum is
+     * changed with the arrows or by clicking, never by typing its index. */
+    if (!f || f->readonly || f->heading || f->is_enum) return false;
+
+    if (c >= '0' && c <= '9') return true;
+    /* A decimal point means nothing on a blade count or a pixel width, so on
+     * those rows it stays available as a shortcut. */
+    if (c == '.') return !f->integral;
+    /* Likewise a sign: an aperture cannot be negative, so '-' keeps opening it
+     * up. An object's x can be, so there it starts a number. */
+    if (c == '-') return f->lo < 0.0;
+    return false;
 }
 
 void os_inspect_format(const Field *f, char *buf, size_t n) {
@@ -507,13 +577,17 @@ void os_inspect_format(const Field *f, char *buf, size_t n) {
     double v = f->value;
     /* An aperture reads as f/5.6, not 5.6 f/, and a focus of 1000 m is
      * infinity as far as any lens is concerned. */
-    if (f->id == FLD_FNO)                  snprintf(buf, n, "F/%.1f", v);
+    if (f->id == FLD_FNO || f->id == FLD_D_FNO)
+                                           snprintf(buf, n, "F/%.1f", v);
     else if (f->id == FLD_D_TSTOP)         snprintf(buf, n, "T/%.1f", v);
     else if ((f->id == FLD_FOCUS || f->id == FLD_D_FAR
               || f->id == FLD_D_HYPER) && (v >= 999.0 || !isfinite(v)))
                                            snprintf(buf, n, "INFINITY");
     else if (f->id == FLD_BLADES && v < 0.5)   snprintf(buf, n, "CIRCLE");
     else if (f->id == FLD_D_SAMPLES)       snprintf(buf, n, "%.0f", v);
+    /* Signed, because the sign IS the answer: + bows a square inward
+     * (pincushion), - bows it outward (barrel). */
+    else if (f->id == FLD_D_DISTORT)       snprintf(buf, n, "%+.3f %s", v, f->unit);
     /* A blade count of "6.00" or a render width of "420.00 PX" reads as a
      * quantity that could be fractional. These cannot be. */
     else if (f->integral)                  snprintf(buf, n, "%.0f %s", v, f->unit);

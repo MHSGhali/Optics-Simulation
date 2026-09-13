@@ -71,6 +71,10 @@ typedef struct {
     ls_real    xp_mag;               /* stop -> exit pupil magnification      */
     ls_real    total_track_mm;       /* front vertex to rear vertex           */
     ls_real    image_circle_mm;
+    /* Copied from the prescription, because the prescription is fetched by
+     * value and gone by the time a UI wants to know. Both zero for a design
+     * that scales freely. */
+    ls_real    focal_min_mm, focal_max_mm;
 
     ls_real    film_z_mm;            /* sensor, from the REAR vertex          */
     ls_real    focus_distance_m;
@@ -122,6 +126,57 @@ ls_real os_lens_vertex_z(const OsLens *L, int i);
  * 10-20 % on a real design -- a quarter of a stop of exposure error that no
  * image would ever reveal. */
 bool os_lens_set_fnumber(OsLens *L, ls_real fno);
+
+/* The smallest f-number this design can actually reach -- the one the iris
+ * hits when it opens to the mechanical bore it sits in.
+ *
+ * os_lens_set_fnumber CLAMPS to this and reports the achieved value in
+ * `f_number`, which is correct and invisible: a UI that keeps offering wider
+ * stops walks its own control past a limit the picture never crosses. Asking
+ * for the limit up front is what lets the control stop there instead. */
+ls_real os_lens_min_fnumber(const OsLens *L);
+
+/* The focal lengths this design can actually be set to.
+ *
+ * A design that SCALES has no range: multiply every length by k and you have a
+ * real lens of the same form at any focal length you like. A design that is a
+ * FAMILY does -- its groups only travel so far, and past the wide end its front
+ * element stops covering the frame -- and asking outside it fails the build
+ * rather than returning something plausible.
+ *
+ * Returns false for a design with no range, leaving the outputs untouched, so
+ * a caller can tell "unbounded" from "bounded at these numbers". The same shape
+ * as os_lens_min_fnumber: a limit the UI reads so a control can stop at it
+ * instead of walking past one that the lens then silently refuses. */
+bool os_lens_focal_range_mm(const OsLens *L, ls_real *min_mm, ls_real *max_mm);
+
+/* The same range, for a design that has not been built yet.
+ *
+ * A UI needs this BEFORE the build: switching to a zoom while the focal
+ * control sits outside its range would otherwise fail the build and show an
+ * error, when the honest thing is to bring the control to the nearest setting
+ * the design can reach. Kept here rather than in prescription.h so that
+ * nothing downstream of this header reads a prescription -- which is that
+ * module's stated invariant. */
+bool os_lens_design_focal_range(OsPrescriptionId id,
+                                ls_real *min_mm, ls_real *max_mm);
+
+/* Distortion at a given image height, as a percentage of that height.
+ *
+ * POSITIVE IS PINCUSHION, negative is barrel. Ask about the sensor's
+ * half-diagonal to get the figure for the frame corner, which is where it is
+ * largest and the only place anyone looks.
+ *
+ * The one aberration that moves an image point instead of spreading it, so it
+ * is invisible in a spot diagram and invisible on a field of round blobs --
+ * it needs points that ought to be collinear. Measured from the chief ray
+ * against the paraxial image height AT THE CURRENT FOCUS, not against
+ * f*tan(theta): that is the infinite-conjugate formula, and using it on a
+ * close-focused lens reports several per cent of the wrong sign.
+ *
+ * HUGE_VAL if the chief ray is vignetted or the subject is inside the front
+ * focal point; 0 for a non-positive height, which has nowhere to move. */
+ls_real os_lens_distortion_pct(const OsLens *L, ls_real image_height_mm);
 
 /* Move the sensor to focus on an object at `distance_m`. HUGE_VAL for
  * infinity. Focusing moves the film, not the glass, so the camera's pose stays

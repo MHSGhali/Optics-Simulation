@@ -64,12 +64,47 @@ PY
 # now, with the exact arguments that made them.
 ./opticsim still --stage rail --fstop 5 --focus 2.0 \
     --width 720 --height 480 --spp 1024 --out "$OUT/rail.ppm" >/dev/null
-# The bokeh exposure is stated rather than left at the default 100x. Twelve
-# small very bright sources against nothing at all put the brightest pixel
-# about 1400x over white at that default, and a blown disc is a white circle
-# whatever shape the iris is -- which is the one thing this picture is of.
-./opticsim still --stage bokeh --blades 6 --focus 1.2 --exposure 0.2 \
+# The same five targets, at one field radius instead of spread across the
+# frame. Rendered at the SAME focus and aperture as the row above, because the
+# pair is the point: the only difference between the two pictures is where the
+# targets sit, and that is what decides whether focusing at 2 m picks out the
+# 2 m target everywhere or only in the middle.
+./opticsim still --stage ring --fstop 5 --focus 2.0 \
+    --width 720 --height 480 --spp 1024 --out "$OUT/ring.ppm" >/dev/null
+# Seventeen objects from 0.55 m to 14 m with one layer of them sharp, so the
+# blur can be watched growing in both directions and dimming with distance.
+#
+# NO --blades, and no --exposure. The blade count used to be here because the
+# scene was a field of small bright lamps whose discs took the shape of the
+# iris; there are no bare sources in it now, so nothing is hard-edged enough to
+# show a polygon and asking for six would imply something the picture does not
+# contain. The exposure used to be 0.2 for the same reason -- those lamps put
+# the brightest pixel about 1400x over white at the default 100x, and at 0.2
+# anything that was not a lamp came out black. Ordinary surfaces under placed
+# lamps sit inside the default gain, like every other render here.
+./opticsim still --stage bokeh --focus 1.2 \
     --width 720 --height 480 --spp 1024 --out "$OUT/bokeh.ppm" >/dev/null
+
+# The distortion chart, on the SINGLET and at 24 mm, because that is where
+# there is anything to see. Distortion is a field aberration: on the achromat
+# at 100 mm the frame corner reaches 0.21 rad and the figure is -0.005 %, which
+# is nothing. Wound out to 24 mm the corner reaches 0.73 rad, and the singlet --
+# one uncorrected element -- gives -2.1 %. Same chart, same focus, one design
+# apart: grid.png is the singlet and gridok.png the achromat, so the pair reads
+# the way the singlet/achromat colour pair does.
+for design in singlet achromat; do
+    out="grid"; [ "$design" = achromat ] && out="gridok"
+    ./opticsim still --stage grid --lens "$design" --focal 24 --focus 2.0 \
+        --width 720 --height 480 --spp 768 --out "$OUT/$out.ppm" >/dev/null
+done
+
+# The zoom at its wide end. Same chart again, and the reason it is here rather
+# than being one more line in the table above: this is the design whose FOCAL
+# LENGTH moved the glass. -23.6 % of barrel at 45 mm against -4.3 % at 100, out
+# of one lens, because the groups separated and the stop went further behind
+# the negative front group.
+./opticsim still --stage grid --lens zoom --focal 45 --focus 2.0 \
+    --width 720 --height 480 --spp 768 --out "$OUT/zoomwide.ppm" >/dev/null
 
 python3 - "$OUT" <<'PY'
 import struct, zlib, sys, os
@@ -93,7 +128,7 @@ def read_ppm(path):
     return fields[0], fields[1], d[i+1:]
 
 out = sys.argv[1]
-for name in ("rail", "bokeh"):
+for name in ("rail", "ring", "bokeh", "grid", "gridok", "zoomwide"):
     src = os.path.join(out, name + ".ppm")
     if not os.path.exists(src):
         continue

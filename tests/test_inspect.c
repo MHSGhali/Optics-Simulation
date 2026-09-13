@@ -195,6 +195,137 @@ void os_test_inspect(void) {
         }
     }
 
+    SECTION("inspect: which characters a row will take as typed input");
+    {
+        /* The predicate the viewer's key handler and text handler BOTH consult,
+         * so that a keystroke cannot be typing to one and a shortcut to the
+         * other. It used to be two separate tests written in different words,
+         * and they drifted: the key handler only knew a keystroke was typing
+         * once a character had already been accepted, so the FIRST character of
+         * every typed number also fired its hotkey. Typing 0.030 into SHARP IF
+         * ran UI_RESET and rebuilt the scene. */
+        OsSettings s;
+        os_settings_default(&s);
+        s.sel_obj = os_scenedesc_next_object(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+        CHECK(n > 0);
+
+        int digits = 0, dots = 0, signs = 0, refused = 0;
+        for (int i = 0; i < n; ++i) {
+            const Field *r = &f[i];
+            bool editable = !r->readonly && !r->heading && !r->is_enum;
+
+            /* A digit is the one character every editable row takes, and no
+             * other row takes anything at all. */
+            for (char c = '0'; c <= '9'; ++c)
+                CHECK(os_inspect_accepts_char(r, c) == editable);
+            if (editable) digits++; else refused++;
+
+            /* A decimal point means nothing on an integer count. */
+            CHECK(os_inspect_accepts_char(r, '.') == (editable && !r->integral));
+            if (editable && !r->integral) dots++;
+
+            /* Nor does a sign, on a row that cannot go below zero. */
+            CHECK(os_inspect_accepts_char(r, '-') == (editable && r->lo < 0.0));
+            if (editable && r->lo < 0.0) signs++;
+
+            /* Nothing else, ever -- a letter must stay a shortcut. */
+            CHECK(!os_inspect_accepts_char(r, 'b'));
+            CHECK(!os_inspect_accepts_char(r, 'z'));
+            CHECK(!os_inspect_accepts_char(r, '='));
+            CHECK(!os_inspect_accepts_char(r, ' '));
+            CHECK(!os_inspect_accepts_char(r, '\0'));
+        }
+        NOTE("%d rows take digits, %d of those take '.', %d take '-'; "
+             "%d rows take nothing", digits, dots, signs, refused);
+        /* All three classes have to exist, or the rules above are being
+         * checked against a panel that cannot exercise them. */
+        CHECK(digits > 0);
+        CHECK(refused > 0);
+        CHECK(dots > 0 && dots < digits);      /* some integer rows           */
+        CHECK(signs > 0 && signs < digits);    /* some rows can go negative   */
+
+        /* A null field is refused rather than dereferenced: the caller resolves
+         * a selection index, and "nothing is selected" has to be answerable. */
+        CHECK(!os_inspect_accepts_char(NULL, '5'));
+    }
+
+    SECTION("inspect: a logarithmic row can always be dragged back up");
+    {
+        /* THE trap in a multiplicative control: zero has no logarithm, and
+         * anything times zero is zero. A lamp's FLUX and the sky's AMBIENT are
+         * both declared with a floor of 0, so dragging one all the way left
+         * used to land on exactly 0 and then STAY there for every drag after
+         * -- the row was dead until someone clicked it and typed a number.
+         *
+         * Checked on the fields the panel really builds, so a new row declared
+         * the same way is covered the day it is added. */
+        OsSettings s;
+        os_settings_default(&s);
+        /* The dome's rows only exist while the dome is the light source, and
+         * a lamp's only while one is selected. */
+        s.scene.light_mode = OS_LIGHT_AMBIENT;
+        s.sel_light = os_scenedesc_next_light(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int checked = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!f[i].logarithmic || f[i].readonly || f[i].is_enum) continue;
+            if (f[i].lo > 0.0) continue;               /* has its own floor */
+            checked++;
+
+            /* All the way to the bottom, however far anyone drags... */
+            double bottom = os_inspect_scrub(&f[i], f[i].value, -100000);
+            CHECK(bottom >= 0.0);
+            /* ...and one pixel back up moves it again. */
+            Field g = f[i]; g.value = bottom;
+            CHECK(os_inspect_scrub(&g, bottom, 1) > bottom);
+            /* A real drag gets somewhere useful rather than crawling out of a
+             * denormal: a stop is about 115 px, so 400 px is several. */
+            CHECK(os_inspect_scrub(&g, bottom, 400) > bottom * 4.0);
+        }
+        NOTE("%d zero-floored logarithmic rows, all recoverable", checked);
+        CHECK(checked >= 2);            /* the lamp's flux and the sky's lux */
+    }
+
+    SECTION("inspect: a continuous row is not scrubbed like an integer one");
+    {
+        /* The coarse whole-unit step exists for BLADES, which would otherwise
+         * need a 200-pixel drag to move by one. It used to be selected by the
+         * row's SPAN -- anything narrower than 32 -- which caught every
+         * continuous 0-to-1 row as well: the blade curvature and the three
+         * object colour channels crossed their entire range in twelve pixels,
+         * so an object's colour could not be adjusted at all. */
+        OsSettings s;
+        os_settings_default(&s);
+        s.sel_obj = os_scenedesc_next_object(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int narrow = 0, coarse = 0;
+        for (int i = 0; i < n; ++i) {
+            if (f[i].heading || f[i].readonly || f[i].is_enum) continue;
+            if (f[i].logarithmic) continue;
+            if (f[i].hi - f[i].lo > 32.0) continue;
+            narrow++;
+
+            /* Ten pixels must not cross a whole range that is not an integer
+             * count -- which is the difference the old rule could not see. */
+            double moved = fabs(os_inspect_scrub(&f[i], f[i].value, 10)
+                                - f[i].value);
+            if (f[i].integral) { coarse++; CHECK(moved >= 0.5); }
+            else               CHECK(moved < (f[i].hi - f[i].lo) * 0.25);
+        }
+        NOTE("%d narrow rows, %d of them integer-valued", narrow, coarse);
+        CHECK(narrow > coarse);       /* there ARE continuous narrow rows */
+        CHECK(coarse >= 1);           /* and BLADES is still steppable    */
+    }
+
     SECTION("inspect: only the photograph's settings restart a render");
     {
         /* Turning the ray fan off must not throw away a converged image, and

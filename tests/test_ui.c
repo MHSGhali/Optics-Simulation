@@ -123,6 +123,85 @@ void os_test_ui(void) {
         }
     }
 
+    SECTION("ui: a typed number must not also fire its hotkey");
+    {
+        /* THE regression, and the reason the two modules are tested together.
+         *
+         * SDL delivers SDL_KEYDOWN before SDL_TEXTINPUT for one keypress, so
+         * the viewer's key handler has to recognise a keystroke as typing
+         * BEFORE the text handler sees it. It did not: it only knew typing was
+         * underway once a character had been accepted, so the FIRST character
+         * of every typed number ALSO ran its shortcut. Typing 0.030 into
+         * SHARP IF fired UI_RESET, which calls os_settings_default and rebuilds
+         * the scene.
+         *
+         * The fix is that main.c consults os_inspect_accepts_char before
+         * ui_action_for_key. This section pins the hazard that makes that
+         * ordering necessary -- if the overlap below ever came out empty,
+         * someone would be entitled to delete the check. */
+        OsSettings s;
+        os_settings_default(&s);
+        s.sel_obj = os_scenedesc_next_object(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+        CHECK(n > 0);
+
+        static const char NUMERIC[] = "0123456789.-";
+        int overlap = 0, rows_at_risk = 0;
+        for (int i = 0; i < n; ++i) {
+            bool risky = false;
+            for (const char *c = NUMERIC; *c; ++c) {
+                if (!os_inspect_accepts_char(&f[i], *c)) continue;
+                if (ui_action_for_key(*c) == UI_NONE) continue;
+                overlap++; risky = true;
+            }
+            if (risky) rows_at_risk++;
+        }
+        NOTE("%d of %d rows have at least one typeable character that is also "
+             "a hotkey; %d such pairs in all", rows_at_risk, n, overlap);
+        /* Non-empty, or the ordering in main.c is protecting nothing. */
+        CHECK(overlap > 0);
+        CHECK(rows_at_risk > 0);
+
+        /* The specific collisions, named, so a change to either table shows up
+         * here as a diff rather than as a surprise in the viewer. */
+        CHECK(ui_action_for_key('0') == UI_RESET);
+        CHECK(ui_action_for_key('1') == UI_VIEW_SCENE);
+        CHECK(ui_action_for_key('2') == UI_VIEW_LENS);
+        CHECK(ui_action_for_key('3') == UI_VIEW_IMAGE);
+        CHECK(ui_action_for_key('-') == UI_OPEN_UP);
+        CHECK(ui_action_for_key('.') == UI_FOCUS_FAR);
+        /* And the ones that never collided, which is why the bug looked
+         * intermittent -- 45 typed cleanly where 0.03 did not. */
+        for (char c = '4'; c <= '9'; ++c) CHECK(ui_action_for_key(c) == UI_NONE);
+
+        /* ---- and the fix must not swallow more than it has to ----
+         *
+         * A row that cannot hold the character leaves it a shortcut. The
+         * aperture's floor is 1, so '-' still opens it up; the blade count is
+         * an integer, so '.' still racks focus out. Both are found from the
+         * real panel rather than assumed. */
+        int fno_row = -1, blades_row = -1;
+        for (int i = 0; i < n; ++i) {
+            if (f[i].id == FLD_FNO)    fno_row = i;
+            if (f[i].id == FLD_BLADES) blades_row = i;
+        }
+        CHECK(fno_row >= 0 && blades_row >= 0);
+        CHECK(!os_inspect_accepts_char(&f[fno_row], '-'));      /* stays OPEN */
+        CHECK(os_inspect_accepts_char(&f[fno_row], '5'));       /* but types  */
+        CHECK(!os_inspect_accepts_char(&f[blades_row], '.'));   /* stays FOCUS*/
+        CHECK(os_inspect_accepts_char(&f[blades_row], '9'));
+
+        /* An object's x CAN go negative, so there the sign is typing. That
+         * pair -- same character, opposite answers on two rows -- is the whole
+         * reason the rule is per-field rather than a flat character set. */
+        int ox_row = -1;
+        for (int i = 0; i < n; ++i) if (f[i].id == FLD_O_X) ox_row = i;
+        CHECK(ox_row >= 0);
+        CHECK(os_inspect_accepts_char(&f[ox_row], '-'));
+    }
+
     SECTION("ui: controls disable themselves at their limits");
     {
         Toolbar t;

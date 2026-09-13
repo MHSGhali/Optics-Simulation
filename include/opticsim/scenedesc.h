@@ -38,7 +38,18 @@
 
 #include "opticsim/stage.h"
 
-#define OS_MAX_OBJECTS 32
+/* 64 rather than 32, because the bokeh field needs 49 of them: seventeen
+ * composed for a 100 mm frame and thirty-two scattered around it so that
+ * winding the focal length down to 35 or 24 mm reveals more scene rather than
+ * more black. The rest is headroom for whoever is arranging one by hand.
+ *
+ * The cost is per UNDO SNAPSHOT, since OsSettings embeds one of these whole:
+ * 112 bytes an object, so this is 3.6 kB more per snapshot and about a
+ * megabyte across the history's 64 steps. The tracer's cost is the one worth
+ * watching -- scene traversal is a linear scan, so every extra object is
+ * touched by every ray -- and stage.h's guidance is to stay under a few
+ * hundred prims, which 64 plus 16 lights does comfortably. */
+#define OS_MAX_OBJECTS 64
 #define OS_MAX_LIGHTS  16
 
 /* ---- limits ----

@@ -22,10 +22,37 @@
 #include "opticsim/env.h"
 #include "lightsim/scene.h"
 
+/* THE TWO RAILS ARE THE SAME EXPERIMENT, ARRANGED TWO WAYS.
+ *
+ * Both put five equal targets at 1.0, 1.5, 2.0, 3.0 and 5.0 m and ask which
+ * one focusing picks out. They differ only in where the targets sit ACROSS the
+ * frame, and that turns out to decide whether the question has a clean answer:
+ *
+ *   RAIL  a row, spread from one side of the frame to the other. Honest about
+ *         what a real lens does off axis, and for that reason a poor control:
+ *         the outer targets carry coma and astigmatism the middle ones do not,
+ *         so a comparison between them is a comparison of focus AND field at
+ *         once. Focused at 5 m, the 5 m target is not the sharpest thing in
+ *         frame -- see tests/test_render_focus.c, which pins that.
+ *
+ *   RING  all five at the SAME angular radius, at five clock positions. Equal
+ *         field radius means identical field aberration, which cancels out of
+ *         every comparison and leaves defocus as the only difference. This is
+ *         the one to use when the question is about focus.
+ *
+ * Keeping both is the point. The row is what a naive test chart looks like and
+ * why it misleads; the ring is the controlled version. Switching between them
+ * with one key is the clearest statement this program can make about why field
+ * position belongs in the discussion at all.
+ */
 typedef enum {
-    OS_STAGE_DEPTH_RAIL,   /* identical targets at staged distances: the       */
-                           /* depth-of-field article                           */
-    OS_STAGE_BOKEH,        /* small bright spheres, to show the iris shape     */
+    OS_STAGE_DEPTH_RAIL,   /* five targets in a ROW across the frame           */
+    OS_STAGE_DEPTH_RING,   /* the same five at one field radius: focus only    */
+    OS_STAGE_BOKEH,        /* a field of depth, from 0.55 m to 14 m            */
+    OS_STAGE_GRID,         /* a flat dot chart: the one scene that shows       */
+                           /* DISTORTION, which moves points instead of        */
+                           /* blurring them and so is invisible on anything    */
+                           /* round                                            */
     OS_STAGE_COUNT
 } OsStageId;
 

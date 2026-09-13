@@ -131,6 +131,74 @@ void os_test_render_focus(void) {
         CHECK(spot5_axis < spot3);
     }
 
+    SECTION("focus: the ring answers the question the row cannot");
+    {
+        /* THE reason there are two depth rails.
+         *
+         * The section above pins the row's failure: spread targets sideways to
+         * stop them stacking in depth and you have put them at five different
+         * field angles, where coma and astigmatism swamp the defocus you meant
+         * to measure. The ring is the same five targets at ONE angular radius,
+         * so the field aberration is identical for all of them and cancels out
+         * of every comparison -- leaving focus as the only variable, which is
+         * what the scene has always claimed to be about.
+         *
+         * Asked the plainest possible way: focus on each target in turn, and
+         * see whether it comes out the sharpest thing in the frame. That is
+         * the promise a focus control makes, and it is the promise the row
+         * breaks. Both scenes are read from the presets themselves, so this
+         * cannot drift from what the program actually ships. */
+        static const char *const STAGE[2] = { "row", "ring" };
+        static const OsStageId ID[2] = { OS_STAGE_DEPTH_RAIL,
+                                         OS_STAGE_DEPTH_RING };
+        int hits[2] = { 0, 0 };
+        ls_real worst_miss[2] = { 1.0, 1.0 };
+
+        for (int k = 0; k < 2; ++k) {
+            OsSceneDesc d;
+            os_scenedesc_preset(&d, ID[k]);
+
+            OsLens L;
+            CHECK(os_lens_build(&L, OS_LENS_ACHROMAT_100, 100.0, 5.0,
+                                why, sizeof why));
+            L.blades = 0;
+            CHECK(os_lens_set_fnumber(&L, 5.0));
+
+            for (int f = 0; f < 5; ++f) {
+                CHECK(os_lens_focus(&L, -d.obj[f].centre.z));
+
+                int best = -1;
+                ls_real best_spot = HUGE_VAL, focused_spot = HUGE_VAL;
+                for (int i = 0; i < 5; ++i) {
+                    ls_real z = -d.obj[i].centre.z;
+                    /* Each target's REAL field height, from where it is. */
+                    ls_real h = sqrt(d.obj[i].centre.x * d.obj[i].centre.x
+                                   + d.obj[i].centre.y * d.obj[i].centre.y);
+                    ls_real sp = os_lens_spot_mm(&L, z, h, 15);
+                    if (i == f) focused_spot = sp;
+                    if (sp < best_spot) { best_spot = sp; best = i; }
+                }
+                if (best == f) hits[k]++;
+                ls_real ratio = best_spot / focused_spot;
+                if (ratio < worst_miss[k]) worst_miss[k] = ratio;
+            }
+            NOTE("%-4s: %d of 5 focus settings pick their own target; at worst "
+                 "the sharpest is %.1fx tighter than the focused one",
+                 STAGE[k], hits[k], 1.0 / worst_miss[k]);
+        }
+
+        /* The row gets it wrong somewhere -- if it ever stops doing so, the
+         * section above is describing a scene that no longer exists and both
+         * should be revisited together. */
+        CHECK(hits[0] < 5);
+        /* And the ring gets it right everywhere, which is the whole claim. */
+        CHECK(hits[1] == 5);
+        /* By a wide margin, not by a hair: the row's worst miss is several
+         * times over, the ring has none at all. */
+        CHECK(worst_miss[0] < 0.5);
+        CHECK_NEAR(worst_miss[1], 1.0, 1e-12);
+    }
+
     SECTION("focus: the spot grows with field, and stops when nothing gets through");
     {
         OsLens L;

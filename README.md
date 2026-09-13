@@ -88,7 +88,11 @@ The same binary is a batch tool when given a command:
 
 ```sh
 ./opticsim still --stage rail --fstop 5 --focus 2.0   # a frame to a file
-./opticsim still --ambient 2000                       # lit by a 2000 lx dome
+./opticsim still --stage ring --fstop 5 --focus 5.0   # the controlled layout
+./opticsim still --stage bokeh --focus 1.2            # a field of depth
+./opticsim still --stage grid --lens singlet --focal 24  # distortion
+./opticsim still --lens zoom --focal 45               # groups, not scaling
+./opticsim still --ambient 800                        # lit by a uniform dome
 ./opticsim glass                                      # the dispersion catalogue
 ./opticsim spectrum                                   # the spectral band
 ./opticsim --help
@@ -159,9 +163,13 @@ The lamp is still there, still draggable, and marked `OFF`.*
 
 *What that records. Nothing casts a shadow and nothing has a terminator, so the
 only thing separating the five targets is how far out of focus they are — and
-the middle one, at 2 m, is plainly the sharp one. Every target is darker than
-the sky behind it, because a Lambertian surface returns rho times what falls on
-it and rho is less than one.*
+the middle one, at 2 m, is plainly the sharp one. The dome lights them and is
+not photographed: a camera ray that hits nothing comes back black, so the
+background stays black in both lighting modes. It has to, because a dome bright
+enough to light a scene outshines everything it lights — rho is below one — and
+in shot it would fill most of the frame, drive the exposure, and leave no
+setting at which the subjects are right and the background is not clipped
+white.*
 
 ![The viewer, showing what the camera records](docs/images/image.png)
 
@@ -172,16 +180,120 @@ code that made it.*
 
 ![Depth of field on the rail](docs/images/rail.png)
 
-*Five identical targets at 1.0, 1.5, 2.0, 3.0 and 5.0 m, focused on the middle
-one at f/5. Each subtends the same angle, so the only difference between them in
-the frame is how far out of focus they are.*
+*Five targets at 1.0, 1.5, 2.0, 3.0 and 5.0 m in a row, focused on the middle
+one at f/5. Each subtends the same angle and each reflects the same 0.48 of the
+light falling on it — they differ in hue so they can be told apart, and in
+nothing else, because the eye reads brightness as sharpness readily enough to
+confuse the one thing this scene is for.*
 
-![Six-blade bokeh](docs/images/bokeh.png)
+![The same five targets on a ring](docs/images/ring.png)
 
-*Lamps at 6 m, focused at 1.2 m, through a six-blade iris. The warm cast is a
-3000 K blackbody carried through the spectral pipeline; the corner discs are
-elongated because off-axis bundles clip on the edges of the glass. Neither is
-drawn — both fall out of tracing the aperture.*
+*The same five distances, the same colours, the same focus and aperture — moved
+onto a ring at one angular radius. This is the controlled version, and the
+difference is not cosmetic. Depth of field is an on-axis, defocus-only idea,
+while every other aberration grows with how far off the axis a subject sits, so
+a row measures focus and field position at once: focused at 5 m, the row's 5 m
+target images 0.45 mm across while its 3 m target images 0.11 mm, and the focus
+dial does not pick out the sharp one. Put all five at the same field radius and
+that error is identical for all of them and cancels; focusing on each in turn
+now makes it the sharpest thing in frame, five times out of five against the
+row's four. Press `PRESET` in the viewer to switch between them.*
+
+![A field of depth](docs/images/bokeh.png)
+
+*Seventeen objects from 0.55 m to 14 m, focused at 1.2 m, at f/5. One thin
+layer is sharp and everything else is not, so the blur can be watched growing
+in both directions from it — the foreground at 0.55 m is blurred on the near
+side of focus, the far objects on the other — and dimming as it goes, because
+illuminance falls as one over r squared and nothing here pretends otherwise.
+Past about 10 m the blur has stopped growing: an object at infinity images a
+fixed distance from the focused one, so extra depth beyond that buys darkness
+rather than softness, and the deepest three are there to sit on the far side of
+that knee. Sizes span 20× in metres and 5× as the frame sees them. Four lamps
+light it, all of them outside the frame — the only thing separating a light
+from a subject here is placement, and they are hung high enough to stay outside
+it at every focal length the viewer offers rather than only at this one.*
+
+*Another thirty-two sit further out, from 0.22 to 0.80 radians off the axis,
+which is past the edge of this frame entirely. They are there for the other end
+of the zoom: a 100 mm lens sees ±0.18 rad, a 24 mm one sees ±0.75, so a scene
+composed only for the long end turns into a small huddle in the middle of a lot
+of black as soon as the lens goes wide. Those are placed on a sunflower spiral
+rather than by hand — even coverage, no clumping, and nobody studies the
+arrangement of a periphery.*
+
+*This scene used to be ten small bright lamps whose out-of-focus images took
+the shape of the iris. That is the other half of the subject and the shape is
+real, but it is only visible in a HIGHLIGHT — a source small and bright enough
+to clip has an edge hard enough to show a polygon, and an ordinary surface does
+not. The iris is still checked, on the pupil itself, in the tests.*
+
+![Distortion: the singlet at 24 mm](docs/images/grid.png)
+
+*Nine by seven dots on one plane, evenly spaced in metres — so they are
+collinear, and a rectilinear lens would image them collinear. This is the
+singlet at 24 mm, and its rows bow: **−2.1 %** at the corner, barrel. Distortion
+is the one aberration here that blurs nothing. It moves an image point instead
+of spreading it, so it cannot be seen in a spot diagram and it cannot be seen on
+a field of round objects — a blob moved slightly outward is still a blob. It
+takes points that ought to be straight. The radial smearing of the outer dots is
+a separate defect: that is astigmatism and field curvature, and at 24 mm this
+lens covers a 4.8 mm image circle on a 43 mm frame.*
+
+![The same chart on the achromat](docs/images/gridok.png)
+
+*The same chart, same focus, same focal length, one design apart: **−0.45 %**.
+Nearly straight. The panel carries the figure as a `DISTORTION` row beside
+`COLOUR ERR`, because both are the same kind of thing — an aberration reduced to
+one signed number, so that swapping the design moves it visibly instead of
+requiring a squint. Positive is pincushion, negative barrel.*
+
+*The number is measured from the chief ray against the paraxial image height **at
+the distance the lens is focused at**, which matters more than it sounds:
+`f·tan θ` is the infinite-conjugate formula, and using it on a lens focused at
+2 m reports about +3 % of pincushion on a design that has half a per cent of
+barrel. Right magnitude, wrong sign, entirely convincing.*
+
+![The zoom at 45 mm](docs/images/zoomwide.png)
+
+*The same chart through `ZOOM`, the one design here whose **focal length moves
+glass**. Every other prescription reaches another focal length by scaling —
+multiply every length by k and you have a real lens of the same form, with every
+angle and therefore every aberration unchanged. A zoom is not that: two
+achromatic doublets with the stop between them, and the separation between them
+sets the focal length. Solved by bisection against the paraxial trace, because
+the groups are 6.5 mm of glass each and the thin-lens identity they were derived
+from is 14 % out at the long end.*
+
+*So the design genuinely changes as you dial it, and the numbers move with it:*
+
+| focal | total track | distortion | colour err |
+|---|---|---|---|
+| 100 mm | 55.1 mm | −4.3 % | −0.692 % |
+| 80 mm | 62.1 mm | −6.9 % | −0.696 % |
+| 60 mm | 73.8 mm | −12.9 % | −0.701 % |
+| 45 mm | 89.3 mm | −23.6 % | −0.704 % |
+
+*The 45 mm setting is the **longer** lens — the groups separate as it goes
+wide — which nothing that merely rescales can do. Distortion sweeps 5.5×. The
+colour error, which I expected to sweep too, does not: each group is achromatic
+on its own, so what is left is their own secondary spectrum, and that travels
+with the glass rather than with the gap. Its level is another matter — −0.70 %
+against the achromat's −0.058 %, because the two groups carry far more power
+than their sum.*
+
+*It runs 45–100 mm and refuses outside that, and both ends are measured rather
+than chosen. The long end is mechanical: closer than 6 mm of separation the
+groups collide. The wide end is optical, and it is the reason there is no
+fisheye in this repo — a retrofocus puts its entrance pupil **behind** the front
+element, 27 mm behind here, so that element's clear aperture caps the field at
+atan(24.7/26.9) = 42°. Past 45 mm the frame corner asks for more than that and
+vignettes. Splitting the front group into weaker elements does not help: each
+radius grows, so each aperture can, but the extra glass pushes the front vertex
+away by the same proportion and the ratio that sets the field never moves. Real
+wide-angles pull the pupil forward with a multi-element negative group whose
+bendings are optimised, not derived — and optimisation is what this file does
+not have.*
 
 In the viewer, `L` swaps the singlet for the achromat and the panel's COLOUR
 ERR row goes from **-1.542 %** to **-0.058 %**: that is the Fraunhofer

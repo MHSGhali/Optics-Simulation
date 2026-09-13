@@ -68,6 +68,12 @@ typedef struct {
     OsStage      st;
     bool         built;
     char         why[256];
+    /* Why the picture is not what the panel asked for, when the build itself
+     * succeeded: a refused focus, or an aperture the design cannot open to.
+     * Separate from `why`, which is a FAILURE -- these are builds that worked
+     * and produced something other than what was requested, which is the case
+     * that otherwise passes in silence. Empty when there is nothing to say. */
+    char         note[192];
 
     Film         film;
     int          W, H;
@@ -112,8 +118,27 @@ static bool renderer_build(Renderer *R, const OsSettings *s) {
     R->cam.lens.blades          = s->blades;
     R->cam.lens.blade_curvature = s->curvature;
     R->cam.lens.blade_rot_rad   = s->rot_deg * LS_PI / 180.0;
+
+    /* BOTH of these can decline, and both used to be called for their side
+     * effect with the answer thrown away.
+     *
+     * os_lens_set_fnumber clamps to the mechanical bore and writes the
+     * f-number it actually achieved back into the lens; os_lens_focus refuses
+     * a subject inside the front focal point and leaves the film exactly where
+     * it was, which after a build is infinity. So the panel could show f/2.5
+     * and 0.2 m over a picture taken at f/5 and focused at infinity, with the
+     * controls moving and nothing on screen disagreeing. */
+    R->note[0] = '\0';
     os_lens_set_fnumber(&R->cam.lens, s->fno);
-    os_lens_focus(&R->cam.lens, s->focus_m);
+    if (fabs(R->cam.lens.f_number - s->fno) > 1e-6)
+        snprintf(R->note, sizeof R->note,
+                 "f/%.2g is wider than %s opens -- shooting at f/%.2f",
+                 (double)s->fno, R->cam.lens.name,
+                 (double)R->cam.lens.f_number);
+    if (!os_lens_focus(&R->cam.lens, s->focus_m))
+        snprintf(R->note, sizeof R->note,
+                 "%.3g m is inside this lens's front focal point -- "
+                 "focused at infinity", (double)s->focus_m);
     os_camera_refresh(&R->cam);
     os_camera_look_at(&R->cam, R->st.cam_eye, R->st.cam_target, v3(0, 1, 0));
 
@@ -254,6 +279,17 @@ typedef struct {
     bool          nudging;
 } App;
 
+/* Is this keystroke bound for the selected field rather than for a shortcut?
+ *
+ * Resolves the selected row and defers to os_inspect_accepts_char, which is the
+ * single authority -- see the note on it in inspect.h for why having two was
+ * the bug. Both the text handler and the key handler call this, so they cannot
+ * disagree about what counts as typing. */
+static bool takes_typed(const App *a, char c) {
+    if (a->sel_row < 0 || a->sel_row >= a->nfields) return false;
+    return os_inspect_accepts_char(&a->fields[a->sel_row], c);
+}
+
 /* Is an edit still in progress? Nothing is recorded while one is, so a drag
  * is one step and not fifty. */
 static bool gesture_active(const App *a) {
@@ -285,13 +321,31 @@ static void say(App *a, StatusLevel lv, const char *fmt, ...) {
  * moves". Adding a setting means adding it to os_settings_image_differs() and
  * nothing else. */
 static void apply(App *a) {
+    /* Bring the focal length inside what the chosen design can reach, BEFORE
+     * trying to build with it. A zoom's groups only travel so far; switching
+     * to one while the control sits at 400 mm would otherwise fail the build
+     * and put an error on screen, where what the user meant is plainly "this
+     * design, as long as it goes". Designs that scale freely report no range
+     * and are left alone. */
+    {
+        ls_real fmin, fmax;
+        if (os_lens_design_focal_range((OsPrescriptionId)a->set.lens,
+                                       &fmin, &fmax)) {
+            if (a->set.focal_mm < fmin) a->set.focal_mm = fmin;
+            if (a->set.focal_mm > fmax) a->set.focal_mm = fmax;
+        }
+    }
+
     bool need_rebuild = os_settings_image_differs(&a->set, &a->R.set);
 
     renderer_park(&a->R);
     a->R.set = a->set;
     if (need_rebuild) {
         if (renderer_build(&a->R, &a->set)) {
-            status_clear_sticky(&a->status);
+            if (a->R.note[0])
+                status_set_sticky(&a->status, STATUS_WARN, a->R.note);
+            else
+                status_clear_sticky(&a->status);
             SDL_AtomicSet(&a->R.restart, 1);
         } else {
             status_set_sticky(&a->status, STATUS_ERROR, a->R.why);
@@ -325,8 +379,24 @@ static UiState ui_state(App *a) {
     s.blades       = a->set.blades;
     s.lens_index   = a->set.lens;
     s.lens_count   = OS_LENS_COUNT;
-    s.focal_mm     = a->set.focal_mm; s.focal_min_mm = 12.0;  s.focal_max_mm = 400.0;
-    s.fno          = a->set.fno;      s.fno_min      = 1.0;   s.fno_max      = 45.0;
+    /* The focal control stops where the DESIGN stops, the same way the aperture
+     * control stops at os_lens_min_fnumber. A zoom's groups only travel so far,
+     * and past its wide end the front element no longer covers the frame -- so
+     * dragging further would walk the number past a build that then refuses,
+     * which reads as a broken program rather than as a limit. A design that
+     * scales freely reports no range and keeps the full 12-400. */
+    s.focal_mm     = a->set.focal_mm;
+    s.focal_min_mm = OS_FOCAL_MIN_MM; s.focal_max_mm = OS_FOCAL_MAX_MM;
+    if (a->R.built)
+        os_lens_focal_range_mm(&a->R.cam.lens, &s.focal_min_mm, &s.focal_max_mm);
+    /* fno_min comes from the LENS, not from a literal. Hard-coded at 1.0 it
+     * let OPEN stay live all the way down while the iris was already against
+     * the bore -- on the achromat, which is wide open at exactly the f/5 the
+     * viewer starts on, that meant the first thing anyone tried did nothing.
+     * ui.c's own rule: a control that does nothing reads as a broken program,
+     * one that greys out reads as a limit. */
+    s.fno          = a->set.fno;      s.fno_max      = 45.0;
+    s.fno_min      = a->R.built ? os_lens_min_fnumber(&a->R.cam.lens) : 1.0;
     s.focus_m      = a->set.focus_m;  s.focus_min_m  = 0.15;  s.focus_max_m  = 1000.0;
 
     s.has_selection   = (a->set.sel_obj >= 0 || a->set.sel_light >= 0);
@@ -356,10 +426,23 @@ static void dispatch(App *a, UiAction act) {
                 a->R.built ? a->R.cam.lens.name : "?");
             return;
 
-        case UI_OPEN_UP:
-            os_inspect_set(&a->set, FLD_FNO, a->set.fno / STOP_THIRD);
+        case UI_OPEN_UP: {
+            /* A third of a stop wider, but never past the glass. The lens
+             * clamps anyway and reports what it reached, so without this the
+             * last click walked the APERTURE row to f/3.97 over a picture
+             * still being taken at f/4.98 -- the setting and the photograph
+             * disagreeing by a third of a stop, with SHOOTING AT as the only
+             * sign. Landing exactly on the limit is what ui.c's own tip
+             * promises: "stops when the iris reaches the edge of the glass". */
+            double want = a->set.fno / STOP_THIRD;
+            if (a->R.built) {
+                double widest = os_lens_min_fnumber(&a->R.cam.lens);
+                if (want < widest) want = widest;
+            }
+            os_inspect_set(&a->set, FLD_FNO, want);
             apply(a);
             return;
+        }
         case UI_STOP_DOWN:
             os_inspect_set(&a->set, FLD_FNO, a->set.fno * STOP_THIRD);
             apply(a);
@@ -730,12 +813,11 @@ int os_viewer_main(int argc, char **argv) {
 
                 case SDL_TEXTINPUT: {
                     /* Type-to-set. Only the pieces of a number are accepted, so
-                     * a stray keystroke cannot half-commit an edit. */
-                    if (a.sel_row < 0 || a.sel_row >= a.nfields) break;
-                    const Field *f = &a.fields[a.sel_row];
-                    if (f->readonly || f->heading || f->is_enum) break;
+                     * a stray keystroke cannot half-commit an edit -- and the
+                     * key handler below asks the same question of the same
+                     * character, one event earlier. */
                     char c = e.text.text[0];
-                    if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) break;
+                    if (!takes_typed(&a, c)) break;
                     size_t n = strlen(a.typing);
                     if (n + 1 < sizeof a.typing) {
                         a.typing[n] = c;
@@ -792,6 +874,16 @@ int os_viewer_main(int argc, char **argv) {
                         if (os_inspect_set(&a.set, f->id, nv)) apply(&a);
                         break;
                     }
+
+                    /* A KEY BOUND FOR A TEXT FIELD IS NOT A HOTKEY, and this
+                     * has to be decided here because SDL sends SDL_KEYDOWN
+                     * first. Without it the FIRST character of every typed
+                     * number also ran its shortcut -- '0' reset every setting
+                     * and the scene, '1' to '3' switched view, '-' opened the
+                     * aperture -- while every character after it was caught by
+                     * the is_typing block above. That asymmetry is why the bug
+                     * looked intermittent: 45 typed cleanly and 0.03 did not. */
+                    if (k < 128 && takes_typed(&a, (char)k)) break;
 
                     if (k < 128) try_action(&a, ui_action_for_key((char)k), &helping);
                     break;
@@ -1058,7 +1150,14 @@ static int run_capture(const char *subject, const char *dir) {
         a.set.scene.light_mode = OS_LIGHT_AMBIENT;
         a.set.res_w = 420;
         a.set.spp   = 24;
-        a.set.exposure = 26.0;
+        /* THE DEFAULT EXPOSURE, deliberately, and it is the claim this capture
+         * exists to make. It used to be 26 because the dome was 2000 lx and
+         * outshone the lamps it replaces by two and a half times, so the two
+         * pictures could not be compared without also compensating for the
+         * lighting. The dome is 800 lx now -- measured against what the rail's
+         * key actually delivers -- so this capture and the LAMPS one beside it
+         * are the same scene at the same exposure, differing only in where the
+         * light comes from, which is the comparison they are for. */
     } else if (!strcmp(subject, "lamp")) {
         a.set.view = OS_VIEW_SCENE;
         a.set.sel_light = 0;

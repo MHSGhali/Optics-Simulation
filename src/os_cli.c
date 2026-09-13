@@ -196,13 +196,16 @@ static int cmd_still(int argc, char **argv) {
             if      (!strcmp(v, "singlet"))  lens = OS_LENS_SINGLET_100;
             else if (!strcmp(v, "achromat")) lens = OS_LENS_ACHROMAT_100;
             else if (!strcmp(v, "thin"))     lens = OS_LENS_THIN;
+            else if (!strcmp(v, "zoom"))     lens = OS_LENS_ZOOM_RETRO;
             else { fprintf(stderr, "still: unknown lens '%s'\n", v); return 2; }
             i++;
         }
         else if (!strcmp(a, "--stage")) {
             NEEDS(a);
             if      (!strcmp(v, "rail"))  stage = OS_STAGE_DEPTH_RAIL;
+            else if (!strcmp(v, "ring"))  stage = OS_STAGE_DEPTH_RING;
             else if (!strcmp(v, "bokeh")) stage = OS_STAGE_BOKEH;
+            else if (!strcmp(v, "grid"))  stage = OS_STAGE_GRID;
             else { fprintf(stderr, "still: unknown stage '%s'\n", v); return 2; }
             i++;
         }
@@ -235,13 +238,51 @@ static int cmd_still(int argc, char **argv) {
         return 1;
     }
     if (blades >= 0) cam.lens.blades = blades;
-    os_lens_focus(&cam.lens, focus);
+    /* SAY SO when the lens cannot do what was asked. os_lens_focus refuses a
+     * subject inside the front focal point and leaves the film where it was --
+     * at infinity, straight out of the build -- so the frame comes out focused
+     * somewhere else entirely. This used to be discarded, and the line below
+     * then printed the REQUESTED distance over a picture that did not have it:
+     * `--focal 400 --focus 0.2` said "focus 0.20 m" above a frame focused at
+     * infinity. */
+    if (!os_lens_focus(&cam.lens, focus))
+        fprintf(stderr, "still: cannot focus at %.3g m -- that is inside this "
+                        "lens's front focal point; focused at infinity "
+                        "instead\n", (double)focus);
     os_camera_refresh(&cam);
     os_camera_look_at(&cam, st.cam_eye, st.cam_target, v3(0.0, 1.0, 0.0));
 
-    printf("lens      %s  %.1f mm  f/%.1f  focus %.2f m\n",
-           cam.lens.name, (double)cam.lens.efl_mm, (double)cam.lens.f_number,
-           (double)focus);
+    /* Reported from the LENS, not from the request, for the same reason the
+     * f-number is: both can be clamped or refused, and a report that echoes
+     * the flag cannot show it. */
+    {
+        char fdist[32];
+        if (isfinite(cam.lens.focus_distance_m))
+            snprintf(fdist, sizeof fdist, "%.2f m",
+                     (double)cam.lens.focus_distance_m);
+        else
+            snprintf(fdist, sizeof fdist, "infinity");
+        printf("lens      %s  %.1f mm  f/%.1f  focus %s\n",
+               cam.lens.name, (double)cam.lens.efl_mm,
+               (double)cam.lens.f_number, fdist);
+    }
+    /* Distortion at the frame corner, reported beside the lens rather than
+     * buried, because it is the one aberration a still cannot show you: it
+     * moves image points instead of blurring them, so it is invisible unless
+     * the scene has something that ought to be straight. Render --stage grid
+     * to see it; this is the number. */
+    {
+        ls_real half_diag = 0.5 * sqrt(cam.sensor_w_mm * cam.sensor_w_mm
+                                     + cam.sensor_h_mm * cam.sensor_h_mm);
+        ls_real d = os_lens_distortion_pct(&cam.lens, half_diag);
+        if (isfinite(d))
+            printf("distortion %+.3f %% at the corner (%.1f mm off axis) -- %s\n",
+                   (double)d, (double)half_diag,
+                   d > 0.0 ? "pincushion" : "barrel");
+        else
+            printf("distortion  the corner is vignetted; no chief ray gets "
+                   "through\n");
+    }
     printf("sensor    %.1f x %.1f mm   %d x %d px   %.1f deg horizontal\n",
            (double)cam.sensor_w_mm, (double)cam.sensor_h_mm, w, h,
            (double)os_camera_hfov_deg(&cam));

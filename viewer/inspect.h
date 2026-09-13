@@ -109,7 +109,8 @@ typedef enum {
     FLD_L_FLUX, FLD_L_CCT, FLD_L_WATTS, FLD_L_EFFICACY,
     FLD_H_SENSOR, FLD_SENSOR_W, FLD_RES, FLD_EXPOSURE, FLD_COC,
     FLD_H_SAMPLING, FLD_SPP, FLD_DEPTH,
-    FLD_H_DERIVED, FLD_D_EFL, FLD_D_HFOV, FLD_D_EP, FLD_D_TSTOP,
+    FLD_H_DERIVED, FLD_D_EFL, FLD_D_HFOV, FLD_D_FNO, FLD_D_EP, FLD_D_TSTOP,
+    FLD_D_DISTORT,
     FLD_D_BFD, FLD_D_FILM, FLD_D_COLOUR, FLD_D_COC, FLD_D_COVER,
     FLD_D_NEAR, FLD_D_FAR, FLD_D_HYPER, FLD_D_SAMPLES,
     FLD_COUNT
@@ -150,6 +151,42 @@ bool os_inspect_set(OsSettings *s, FieldId id, double v);
 /* One scrub step: `dx` pixels of drag on `f`. Multiplicative for the wide
  * ranges, linear otherwise. */
 double os_inspect_scrub(const Field *f, double v, int dx);
+
+/* ---- the focal range the CONTROL offers ----
+ *
+ * Here because inspect.h owns "one place a setting's bounds live", and this one
+ * had drifted into three: the field list, os_inspect_set's clamp, and the
+ * viewer's button limits. Three copies of a bound is the exact failure this
+ * module's invariant exists to prevent -- a value that clamps when dragged and
+ * not when typed.
+ *
+ * 2.5 mm is far shorter than the shipped designs can COVER: the prescriptions
+ * are reached at other focal lengths by scaling, so a 100 mm doublet at 2.5 mm
+ * covers a 0.5 mm image circle on a 43 mm frame, and all but the middle of the
+ * picture is aberration. That is honest output rather than a reason to forbid
+ * the setting -- os_lens_distortion_pct and the COVERS row say exactly how bad
+ * it is, which is the point. A design with a range of its own (a zoom) clamps
+ * tighter, through os_lens_design_focal_range. */
+#define OS_FOCAL_MIN_MM   2.5
+#define OS_FOCAL_MAX_MM 400.0
+
+/* Would `c` be taken as part of a typed value for this field?
+ *
+ * THE ONE PLACE THAT DECIDES, and it has to be, because two callers depend on
+ * agreeing exactly. SDL delivers SDL_KEYDOWN before SDL_TEXTINPUT for the same
+ * press, so the key handler has to know a keystroke is bound for a text field
+ * BEFORE the text handler has seen it. When those two tests were written
+ * separately they drifted, and the difference leaked out as a hotkey: the first
+ * character of every typed number also ran its shortcut, so typing 0.030 into
+ * SHARP IF fired UI_RESET and rebuilt the scene. Only the first character --
+ * everything after it was caught -- which is why 45 typed cleanly and 0.03
+ * did not.
+ *
+ * A character is accepted only if it could legitimately belong to THIS field's
+ * value, which keeps as many shortcuts alive as possible while a row is
+ * selected: '.' stays UI_FOCUS_FAR on an integer row, and '-' stays UI_OPEN_UP
+ * on a row that cannot go negative. */
+bool os_inspect_accepts_char(const Field *f, char c);
 
 void os_inspect_format(const Field *f, char *buf, size_t n);
 

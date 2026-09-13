@@ -124,9 +124,37 @@ static YU ynu_range(const OsLens *L, ls_real lambda_nm, bool forward,
         ls_real np = forward ? os_lens_n_after(L, i, lambda_nm)
                              : os_lens_n_before(L, i, lambda_nm);
         ls_real R  = L->surf[i].radius_mm;
-        /* Travelling the other way flips the sign of the curvature. */
-        ls_real Reff = forward ? R : -R;
-        ls_real power = (fabs(Reff) < 1e-12) ? 0.0 : (np - n) / Reff;
+        /* R IS NOT NEGATED ON THE WAY BACK, and it used to be.
+         *
+         * Which convention `u` is in decides this, and the transfer three lines
+         * up settles it: `zi - z` is a SIGNED z displacement, negative when
+         * walking backward, so `u` is dy/dz in the lens's own fixed z frame at
+         * both ends of the loop. It is not a slope along the direction of
+         * travel, and the system is never mirrored.
+         *
+         * In that frame the paraxial refraction relation
+         *
+         *     n_hi * u_hi = n_lo * u_lo - y * (n_hi - n_lo) / R
+         *
+         * is one equation relating the two sides of the surface, and it does
+         * not care which way the ray is going -- only which side it is coming
+         * from, which is what the n/np swap above already expresses. Negating R
+         * as WELL applied the mirrored convention on top of the unmirrored one
+         * and flipped the sign of the curvature term. On a stop 10 mm inside an
+         * n = 1.5 medium imaged back through an R = +100 surface it put the
+         * image at z = 6.4516 with magnification 0.9677, where the closed form
+         * for a single refracting surface says 6.8966 and 1.0345.
+         *
+         * The other backward trace in this file -- the front focal distance in
+         * os_lens_build -- is the mirrored one, and correctly negates R,
+         * because ITS transfer adds a POSITIVE thickness. Two backward walks,
+         * two conventions; the tested one was the other one.
+         *
+         * Nothing shipped changed when this was fixed: every prescription here
+         * puts the stop on surface 0, so entrance_pupil short-circuits and this
+         * branch is only reached by a design with the stop behind the front
+         * element. It is reached the moment anyone adds a double Gauss. */
+        ls_real power = (fabs(R) < 1e-12) ? 0.0 : (np - n) / R;
         u = (n * u - y * power) / np;
     }
     y += u * (z_end - z);
@@ -248,6 +276,37 @@ bool os_lens_set_fnumber(OsLens *L, ls_real fno) {
     return true;
 }
 
+bool os_lens_design_focal_range(OsPrescriptionId id,
+                                ls_real *min_mm, ls_real *max_mm) {
+    OsPrescription p;
+    if (!os_prescription(id, 0.0, &p)) return false;
+    if (!(p.focal_min_mm > 0.0) || !(p.focal_max_mm > p.focal_min_mm)) return false;
+    if (min_mm) *min_mm = p.focal_min_mm;
+    if (max_mm) *max_mm = p.focal_max_mm;
+    return true;
+}
+
+bool os_lens_focal_range_mm(const OsLens *L, ls_real *min_mm, ls_real *max_mm) {
+    if (!(L->focal_min_mm > 0.0) || !(L->focal_max_mm > L->focal_min_mm))
+        return false;
+    if (min_mm) *min_mm = L->focal_min_mm;
+    if (max_mm) *max_mm = L->focal_max_mm;
+    return true;
+}
+
+ls_real os_lens_min_fnumber(const OsLens *L) {
+    /* The same arithmetic set_fnumber's clamp performs, run forward: the stop
+     * can grow to the bore, the entrance pupil is that magnified by the glass
+     * in front of it, and the f-number is the focal length over its diameter.
+     * ep_mag does not depend on the stop's SIZE -- image_stop traces a unit
+     * height -- so this is a property of the design, not of its current
+     * setting. */
+    ls_real limit = L->surf[L->stop_index].semi_ap_mm;
+    ls_real m = fabs(L->ep_mag) > 1e-12 ? fabs(L->ep_mag) : 1.0;
+    ls_real widest = limit * m;
+    return widest > 0.0 ? L->efl_mm / (2.0 * widest) : HUGE_VAL;
+}
+
 /* ---- focus --------------------------------------------------------------
  *
  * Newton on the film position would be overkill here: for an object at
@@ -303,59 +362,156 @@ ls_real os_lens_half_fov_deg(const OsLens *L, ls_real sensor_diagonal_mm) {
 
 /* ---- build -------------------------------------------------------------- */
 
+/* How far a surface reaches from its own vertex at height h, signed along +z.
+ *
+ * Positive R curves toward the image and the cap bulges that way; negative R
+ * curves the other way. A plano reaches nowhere. Clamped at |R| because a
+ * semi-aperture wider than the radius describes a hemisphere, and the sag there
+ * is exactly R rather than a NaN. */
+static ls_real surface_sag_mm(ls_real radius_mm, ls_real h) {
+    if (fabs(radius_mm) < 1e-12) return 0.0;
+    ls_real r2 = radius_mm * radius_mm, h2 = h * h;
+    ls_real root = h2 >= r2 ? 0.0 : sqrt(r2 - h2);
+    return radius_mm > 0.0 ? radius_mm - root : radius_mm + root;
+}
+
+/* The FRONT focal distance, by the y-nu trace run from the other end.
+ *
+ * Extracted from os_lens_build because it is no longer computed once: a
+ * parametric design is measured at several separations before one is chosen,
+ * and every measurement needs the whole first-order set. Note the MIRRORED
+ * convention -- a positive thickness added while walking backward, and the
+ * radius negated to match -- which is a different frame from ynu_range's and
+ * is why that function does NOT negate its radius. See the note there. */
+static void first_order(OsLens *L) {
+    os_lens_paraxial(L, OS_LINE_D, &L->efl_mm, &L->bfd_mm, &L->pp_rear_mm);
+
+    ls_real y = 1.0, u = 0.0;
+    for (int i = L->nsurf - 1; i >= 0; --i) {
+        ls_real n  = os_lens_n_after(L, i, OS_LINE_D);
+        ls_real np = os_lens_n_before(L, i, OS_LINE_D);
+        ls_real R  = L->surf[i].radius_mm;
+        if (i + 1 < L->nsurf) y += u * L->surf[i].thickness_mm;
+        ls_real power = (fabs(R) < 1e-12) ? 0.0 : (np - n) / (-R);
+        u = (n * u - y * power) / np;
+    }
+    /* NEGATED, because this ray travels in -z: a crossing 100 mm ahead of the
+     * front vertex sits at z = -100 in the lens's own coordinates. Without the
+     * flip a thin lens reports its front focal point 100 mm BEHIND its vertex,
+     * which puts the front principal plane 200 mm out and makes every focus
+     * distance wrong -- consistently, and in a way that still focuses on
+     * something. */
+    L->ffd_mm = (fabs(u) < 1e-15) ? -HUGE_VAL : y / u;
+
+    L->total_track_mm = os_lens_vertex_z(L, L->nsurf - 1);
+}
+
+/* Copy a prescription into the lens and resolve its glasses. Returns the
+ * offending surface index, or -1 on success. */
+static int load_prescription(OsLens *L, const OsPrescription *p) {
+    L->nsurf = p->nsurf;
+    L->stop_index = p->stop_index >= 0 ? p->stop_index : 0;
+    L->image_circle_mm = p->image_circle_mm;
+    L->focal_min_mm = p->focal_min_mm;
+    L->focal_max_mm = p->focal_max_mm;
+    for (int i = 0; i < p->nsurf; ++i) {
+        L->surf[i] = p->surf[i];
+        if (!os_glassref_resolve(p->surf[i].glass, &L->glass[i])) return i;
+    }
+    return -1;
+}
+
 bool os_lens_build(OsLens *L, OsPrescriptionId id, ls_real efl_mm,
                    ls_real fno, char *why, size_t nwhy) {
     OsPrescription p;
-    if (!os_prescription(id, &p)) {
+    if (!os_prescription(id, 0.0, &p)) {
         snprintf(why, nwhy, "no such prescription (%d)", (int)id);
+        return false;
+    }
+
+    /* A prescription with more surfaces than the lens can hold would run off
+     * the end of two fixed arrays without a word. Nothing shipped does, but a
+     * design is data and this is the only place it is trusted. */
+    if (p.nsurf < 1 || p.nsurf > OS_MAX_SURF) {
+        snprintf(why, nwhy, "%s: %d surfaces, and the limit is %d",
+                 p.name, p.nsurf, OS_MAX_SURF);
         return false;
     }
 
     memset(L, 0, sizeof *L);
     snprintf(L->name, sizeof L->name, "%s", p.name);
-    L->nsurf = p.nsurf;
-    L->stop_index = p.stop_index >= 0 ? p.stop_index : 0;
-    L->image_circle_mm = p.image_circle_mm;
 
-    for (int i = 0; i < p.nsurf; ++i) {
-        L->surf[i] = p.surf[i];
-        if (!os_glassref_resolve(p.surf[i].glass, &L->glass[i])) {
-            snprintf(why, nwhy, "%s: surface %d names a glass that would not "
-                                "resolve", p.name, i);
+    /* ---- a FAMILY is solved, not scaled ----
+     *
+     * A parametric design already has the focal length in its geometry: the
+     * separation between its groups IS the zoom setting. So instead of
+     * measuring the lens and multiplying every length by a ratio, find the
+     * separation whose measured focal length is the one asked for.
+     *
+     * Solved by bisection against the paraxial trace rather than from the
+     * thin-lens identity, because the groups are 6.5 mm of glass each and the
+     * identity is out by 14 % at the long end. Focal length falls monotonically
+     * as the groups separate, which is what makes a bisection legitimate. */
+    if (p.parametric) {
+        ls_real want = efl_mm > 0.0
+                     ? efl_mm
+                     : sqrt(p.focal_min_mm * p.focal_max_mm);   /* mid-range */
+        if (want < p.focal_min_mm * (1.0 - 1e-9) ||
+            want > p.focal_max_mm * (1.0 + 1e-9)) {
+            /* Say WHICH end, because the two ends fail for different
+             * reasons and the reader deserves the right one. */
+            snprintf(why, nwhy,
+                     "%s: %.4g mm is outside what this design's groups reach "
+                     "(%.4g to %.4g mm) -- %s",
+                     p.name, want, p.focal_min_mm, p.focal_max_mm,
+                     want > p.focal_max_mm
+                        ? "closer than its shortest separation the groups collide"
+                        : "past the wide end its front element stops covering "
+                          "the frame");
             return false;
         }
+
+        ls_real lo = p.param_min, hi = p.param_max;
+        for (int it = 0; it < 60; ++it) {
+            ls_real mid = 0.5 * (lo + hi);
+            OsPrescription q;
+            if (!os_prescription(id, mid, &q)) break;
+            int bad = load_prescription(L, &q);
+            if (bad >= 0) {
+                snprintf(why, nwhy, "%s: surface %d names a glass that would "
+                                    "not resolve", q.name, bad);
+                return false;
+            }
+            first_order(L);
+            if (!isfinite(L->efl_mm) || L->efl_mm <= 0.0) { lo = mid; continue; }
+            /* Longer than wanted means the groups need to move apart. */
+            if (L->efl_mm > want) lo = mid; else hi = mid;
+        }
+        /* Rebuild at the settled separation so the lens carries it, and tell
+         * the gate below what this setting was supposed to deliver. */
+        OsPrescription q;
+        if (!os_prescription(id, 0.5 * (lo + hi), &q)) {
+            snprintf(why, nwhy, "%s: the separation solve did not converge",
+                     p.name);
+            return false;
+        }
+        q.design_efl_mm = want;
+        p = q;
     }
-    L->total_track_mm = os_lens_vertex_z(L, L->nsurf - 1);
+
+    int bad = load_prescription(L, &p);
+    if (bad >= 0) {
+        snprintf(why, nwhy, "%s: surface %d names a glass that would not "
+                            "resolve", p.name, bad);
+        return false;
+    }
 
     /* First-order properties, at the d line, before anything can use them. */
-    os_lens_paraxial(L, OS_LINE_D, &L->efl_mm, &L->bfd_mm, &L->pp_rear_mm);
+    first_order(L);
     if (!isfinite(L->efl_mm) || L->efl_mm <= 0.0) {
         snprintf(why, nwhy, "%s: paraxial focal length is not a positive "
                             "finite number (%.4g)", p.name, L->efl_mm);
         return false;
-    }
-
-    /* The front focal distance, by the same trace run from the other end. */
-    {
-        ls_real y = 1.0, u = 0.0;
-        for (int i = L->nsurf - 1; i >= 0; --i) {
-            ls_real n  = os_lens_n_after(L, i, OS_LINE_D);
-            ls_real np = os_lens_n_before(L, i, OS_LINE_D);
-            ls_real R  = L->surf[i].radius_mm;
-            if (i + 1 < L->nsurf) y += u * L->surf[i].thickness_mm;
-            ls_real power = (fabs(R) < 1e-12) ? 0.0 : (np - n) / (-R);
-            u = (n * u - y * power) / np;
-        }
-        /* NEGATED, because this ray travels in -z.
-         *
-         * The y-nu trace reports the crossing as a DISTANCE along the
-         * direction of travel; that direction is toward the object, so a
-         * crossing 100 mm ahead of the front vertex sits at z = -100 in the
-         * lens's own coordinates. Without the flip a thin lens reports its
-         * front focal point 100 mm BEHIND its vertex, which puts the front
-         * principal plane 200 mm out and makes every focus distance wrong --
-         * consistently, and in a way that still focuses on something. */
-        L->ffd_mm = (fabs(u) < 1e-15) ? -HUGE_VAL : y / u;
     }
 
     /* THE transcription gate. A prescription whose paraxial focal length does
@@ -371,6 +527,46 @@ bool os_lens_build(OsLens *L, OsPrescriptionId id, ls_real efl_mm,
         return false;
     }
 
+    /* THE OTHER transcription gate: the surfaces must not pass through each
+     * other.
+     *
+     * A prescription is a list of vertex positions, but a surface is not AT its
+     * vertex -- a curved one reaches sag(h) = R - sqrt(R^2 - h^2) away from it,
+     * and at a wide clear aperture that is millimetres. If surface i reaches
+     * past surface i+1 anywhere inside the aperture they share, the two are
+     * interpenetrating, and the SEQUENTIAL tracer cannot cope: it visits
+     * surfaces in prescription order rather than in hit order, so a ray reaches
+     * the second one having already flown through where the first was and then
+     * finds it behind itself. os_surface_hit wants t > 0, gets neither root
+     * positive, and reports the ray vignetted.
+     *
+     * The failure mode is what makes this worth a gate rather than a comment: a
+     * lens like that does not error, it renders BLACK, and a black render is
+     * indistinguishable from a lighting mistake. The ideal lens shipped that
+     * way -- its two surfaces shared a vertex while the first bulged 13.4 mm
+     * past it -- and nothing here noticed, because nothing here rendered
+     * through it.
+     *
+     * Checked at the smaller of the two clear semi-apertures, which is the
+     * widest height at which both surfaces exist. The real designs pass with
+     * millimetres to spare: 3.03 mm of edge clearance on the singlet, 3.78 and
+     * 2.61 on the achromat. Scale-invariant, since os_lens_build scales every
+     * length by the same k. */
+    for (int i = 0; i + 1 < L->nsurf; ++i) {
+        ls_real h = ls_min(L->surf[i].semi_ap_mm, L->surf[i + 1].semi_ap_mm);
+        ls_real z0 = os_lens_vertex_z(L, i)     + surface_sag_mm(L->surf[i].radius_mm, h);
+        ls_real z1 = os_lens_vertex_z(L, i + 1) + surface_sag_mm(L->surf[i + 1].radius_mm, h);
+        if (z0 > z1) {
+            snprintf(why, nwhy,
+                     "%s: surfaces %d and %d interpenetrate -- at the %.3f mm "
+                     "clear semi-aperture the first reaches z = %.3f mm and the "
+                     "second only %.3f mm, so a sequential trace cannot reach "
+                     "them in order and every ray would come back vignetted",
+                     p.name, i, i + 1, h, z0, z1);
+            return false;
+        }
+    }
+
     /* Scale to the REQUESTED focal length, using the focal length actually
      * measured rather than the design's nominal one.
      *
@@ -380,8 +576,11 @@ bool os_lens_build(OsLens *L, OsPrescriptionId id, ls_real efl_mm,
      * hand back an 84.7 mm one -- small, permanent, and invisible in every
      * image. Paraxial focal length is exactly proportional to k, so measuring
      * once and dividing is exact and needs no iteration. */
+    /* A parametric design is NOT scaled. Its separation already delivers the
+     * focal length asked for -- that was the solve above -- and scaling it
+     * afterwards would multiply the answer by itself. */
     L->scale = 1.0;
-    if (efl_mm > 0.0) {
+    if (efl_mm > 0.0 && !p.parametric) {
         ls_real k = efl_mm / L->efl_mm;
         for (int i = 0; i < L->nsurf; ++i) {
             L->surf[i].radius_mm    *= k;
@@ -804,4 +1003,87 @@ ls_real os_lens_spot_mm(const OsLens *L, ls_real object_distance_m,
     /* Reported as a DIAMETER, so it compares directly with os_lens_coc_mm and
      * with the sharpness criterion the user sets. */
     return 2.0 * sqrt(s2 / (ls_real)n);
+}
+
+/* ---- distortion ---------------------------------------------------------
+ *
+ * The one aberration that does not blur anything. Every other defect here
+ * spreads a point into a patch; distortion moves the patch, whole and sharp,
+ * to the wrong radius. So it cannot be seen in a spot diagram and it cannot be
+ * seen on a scattered field of blobs -- it takes points that OUGHT to be
+ * collinear, which is why the GRID stage exists.
+ *
+ * MEASURED AGAINST THE PARAXIAL IMAGE HEIGHT AT THIS CONJUGATE, which is the
+ * textbook definition and the only one that is not quietly wrong. It is easy
+ * to compare the real height against f*tan(theta) instead -- that is the
+ * INFINITE-conjugate formula, and using it on a lens focused at 2 m reports
+ * about +3 % of pincushion on a design that actually has half a per cent of
+ * barrel. The reference has to move with the focus.
+ *
+ * The real height comes from the CHIEF ray -- the one through the centre of
+ * the entrance pupil -- because that is the ray that defines where the image
+ * of a point sits. Not the centroid of the whole bundle: at a field angle
+ * where vignetting has eaten one side of the pupil, the centroid shifts for a
+ * reason that is not distortion. */
+ls_real os_lens_distortion_pct(const OsLens *L, ls_real image_height_mm) {
+    /* On axis there is nothing to displace, and nothing to divide by. */
+    if (!(image_height_mm > 0.0)) return 0.0;
+
+    /* The object goes at the distance the lens is focused at, so its paraxial
+     * image lands ON the film and the only thing left between the paraxial
+     * prediction and the traced ray is distortion. Infinity is traced from far
+     * enough away that the conjugate is infinite to double precision, which
+     * makes the reference f*tan(theta) again -- correctly, this time, because
+     * that is the conjugate the lens is actually set for. */
+    ls_real dist_mm = isfinite(L->focus_distance_m)
+                    ? L->focus_distance_m * 1000.0 : 1.0e9;
+    /* Infinity gets a stand-in distance rather than a special case: at 1e9 mm
+     * the conjugate is infinite to well past double precision, so the paraxial
+     * reference below collapses to f*tan(theta) on its own. The stand-in is
+     * only ever used to define a DIRECTION -- see the launch point below, which
+     * is what keeps the arithmetic conditioned. */
+
+    ls_real s_from_pp = dist_mm - (L->ffd_mm + L->efl_mm);
+    if (!(s_from_pp > L->efl_mm)) return HUGE_VAL;   /* inside the focal point */
+
+    ls_real s_prime = 1.0 / (1.0 / L->efl_mm - 1.0 / s_from_pp);
+    ls_real mag = s_prime / s_from_pp;               /* magnitude; the image
+                                                        is inverted and fabs
+                                                        below accounts for it */
+    if (!(mag > 0.0)) return HUGE_VAL;
+
+    /* The object height whose PARAXIAL image lands exactly where we are
+     * asking about. Inverting the magnification rather than sweeping angles
+     * is what makes the answer addressable by film position -- the panel asks
+     * about the frame corner, which is a position, not an angle. */
+    ls_real y_obj = image_height_mm / mag;
+
+    /* The chief ray is the LINE from that object through the pupil centre, and
+     * a line can be launched from anywhere along itself. Launch it from close
+     * to the glass rather than from the object.
+     *
+     * That is not tidiness, it is precision. os_surface_hit forms
+     * dot(m,m) - R^2 with m the vector from the ray origin to the sphere
+     * centre, and for an object a kilometre away that subtracts two numbers
+     * near 1e12 to get one near 1e4 -- eight of sixteen digits gone before the
+     * trace starts. At the 1e9 mm stand-in an infinite conjugate wants, it is
+     * fourteen digits gone, and this function reported +3 % of pincushion on a
+     * design with half a per cent of barrel. Ten focal lengths out keeps every
+     * intermediate near the size of the lens. */
+    vec3 pupil = v3(0.0, 0.0, L->ep_z_mm);
+    vec3 dir   = v3norm(v3sub(pupil, v3(y_obj, 0.0, -dist_mm)));
+    vec3 o     = v3sub(pupil, v3scale(dir, 10.0 * L->efl_mm));
+
+    OsLensRay r = { o, dir };
+    if (!os_lens_trace(L, OS_LINE_D, &r, NULL)) return HUGE_VAL;
+    if (fabs(r.d.z) < 1e-15) return HUGE_VAL;
+
+    ls_real zf = os_lens_vertex_z(L, L->nsurf - 1) + L->film_z_mm;
+    ls_real t  = (zf - r.o.z) / r.d.z;
+    ls_real real_mm = fabs(r.o.x + t * r.d.x);
+
+    /* Positive is PINCUSHION -- the corner lands further out than it should,
+     * so a square bows inward. Negative is barrel. Every design shipped here
+     * is negative. */
+    return 100.0 * (real_mm - image_height_mm) / image_height_mm;
 }

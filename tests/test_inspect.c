@@ -195,6 +195,213 @@ void os_test_inspect(void) {
         }
     }
 
+    SECTION("inspect: the focal control's range is one the lens can honour");
+    {
+        /* The bound lives in ONE place now. It had drifted into three -- the
+         * field list, os_inspect_set's clamp, and the viewer's button limits --
+         * which is the exact failure inspect.h's invariant is written against:
+         * a value that clamps when dragged and not when typed. */
+        OsSettings s;
+        os_settings_default(&s);
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int row = -1;
+        for (int i = 0; i < n; ++i) if (f[i].id == FLD_FOCAL) row = i;
+        CHECK(row >= 0);
+        CHECK_NEAR(f[row].lo, OS_FOCAL_MIN_MM, 1e-12);
+        CHECK_NEAR(f[row].hi, OS_FOCAL_MAX_MM, 1e-12);
+
+        /* Both ends are reachable, and nothing beyond them is. */
+        CHECK(os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MIN_MM));
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MIN_MM, 1e-12);
+        os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MIN_MM * 0.1);
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MIN_MM, 1e-12);
+        CHECK(os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MAX_MM));
+        os_inspect_set(&s, FLD_FOCAL, OS_FOCAL_MAX_MM * 10.0);
+        CHECK_NEAR(s.focal_mm, OS_FOCAL_MAX_MM, 1e-12);
+
+        /* ---- and the range is one the LENS can actually be built at ----
+         *
+         * A control whose floor the tracer refuses is a trap: the panel would
+         * offer a setting that blanks the window. Every design that scales has
+         * to build at both ends, and produce a lens that passes light rather
+         * than merely constructing. 2.5 mm is a long way outside what these
+         * prescriptions COVER -- a 100 mm doublet scaled that far covers half a
+         * millimetre on a 43 mm frame -- but covering badly and failing to
+         * build are different things, and only the second is a bug. */
+        char why[256];
+        static const OsPrescriptionId SCALED[3] = {
+            OS_LENS_THIN, OS_LENS_SINGLET_100, OS_LENS_ACHROMAT_100 };
+        for (int k = 0; k < 3; ++k) {
+            for (int end = 0; end < 2; ++end) {
+                ls_real f_mm = end ? OS_FOCAL_MAX_MM : OS_FOCAL_MIN_MM;
+                OsLens L;
+                CHECK(os_lens_build(&L, SCALED[k], f_mm, 5.0, why, sizeof why));
+                CHECK_NEAR(L.efl_mm, f_mm, 1e-9);
+                CHECK(os_lens_focus(&L, 2.5));
+
+                /* Light gets through on axis, which is the difference between
+                 * a lens that covers poorly and a black frame. */
+                ls_real spot = os_lens_spot_mm(&L, 2.5, 0.0, 11);
+                CHECK(isfinite(spot));
+                CHECK(spot > 0.0);
+            }
+        }
+
+        /* At the floor the coverage really is that bad, and the panel says so
+         * rather than hiding it -- which is the reason the setting is allowed
+         * at all. */
+        OsLens tiny;
+        CHECK(os_lens_build(&tiny, OS_LENS_ACHROMAT_100, OS_FOCAL_MIN_MM, 5.0,
+                            why, sizeof why));
+        ls_real half_diag = 0.5 * sqrt(36.0 * 36.0 + 24.0 * 24.0);
+        NOTE("at %.1f mm the achromat covers %.2f mm against a %.1f mm frame "
+             "corner -- %.0fx outside", OS_FOCAL_MIN_MM,
+             tiny.image_circle_mm * 0.5, half_diag,
+             half_diag / (tiny.image_circle_mm * 0.5));
+        CHECK(half_diag / (tiny.image_circle_mm * 0.5) > 50.0);
+
+        /* A design with a range of its own still clamps tighter than the
+         * control does -- the zoom cannot be dialled to 2.5 mm however far the
+         * slider goes. */
+        ls_real zmin = 0.0, zmax = 0.0;
+        CHECK(os_lens_design_focal_range(OS_LENS_ZOOM_RETRO, &zmin, &zmax));
+        CHECK(zmin > OS_FOCAL_MIN_MM);
+        CHECK(zmax < OS_FOCAL_MAX_MM);
+    }
+
+    SECTION("inspect: which characters a row will take as typed input");
+    {
+        /* The predicate the viewer's key handler and text handler BOTH consult,
+         * so that a keystroke cannot be typing to one and a shortcut to the
+         * other. It used to be two separate tests written in different words,
+         * and they drifted: the key handler only knew a keystroke was typing
+         * once a character had already been accepted, so the FIRST character of
+         * every typed number also fired its hotkey. Typing 0.030 into SHARP IF
+         * ran UI_RESET and rebuilt the scene. */
+        OsSettings s;
+        os_settings_default(&s);
+        s.sel_obj = os_scenedesc_next_object(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+        CHECK(n > 0);
+
+        int digits = 0, dots = 0, signs = 0, refused = 0;
+        for (int i = 0; i < n; ++i) {
+            const Field *r = &f[i];
+            bool editable = !r->readonly && !r->heading && !r->is_enum;
+
+            /* A digit is the one character every editable row takes, and no
+             * other row takes anything at all. */
+            for (char c = '0'; c <= '9'; ++c)
+                CHECK(os_inspect_accepts_char(r, c) == editable);
+            if (editable) digits++; else refused++;
+
+            /* A decimal point means nothing on an integer count. */
+            CHECK(os_inspect_accepts_char(r, '.') == (editable && !r->integral));
+            if (editable && !r->integral) dots++;
+
+            /* Nor does a sign, on a row that cannot go below zero. */
+            CHECK(os_inspect_accepts_char(r, '-') == (editable && r->lo < 0.0));
+            if (editable && r->lo < 0.0) signs++;
+
+            /* Nothing else, ever -- a letter must stay a shortcut. */
+            CHECK(!os_inspect_accepts_char(r, 'b'));
+            CHECK(!os_inspect_accepts_char(r, 'z'));
+            CHECK(!os_inspect_accepts_char(r, '='));
+            CHECK(!os_inspect_accepts_char(r, ' '));
+            CHECK(!os_inspect_accepts_char(r, '\0'));
+        }
+        NOTE("%d rows take digits, %d of those take '.', %d take '-'; "
+             "%d rows take nothing", digits, dots, signs, refused);
+        /* All three classes have to exist, or the rules above are being
+         * checked against a panel that cannot exercise them. */
+        CHECK(digits > 0);
+        CHECK(refused > 0);
+        CHECK(dots > 0 && dots < digits);      /* some integer rows           */
+        CHECK(signs > 0 && signs < digits);    /* some rows can go negative   */
+
+        /* A null field is refused rather than dereferenced: the caller resolves
+         * a selection index, and "nothing is selected" has to be answerable. */
+        CHECK(!os_inspect_accepts_char(NULL, '5'));
+    }
+
+    SECTION("inspect: a logarithmic row can always be dragged back up");
+    {
+        /* THE trap in a multiplicative control: zero has no logarithm, and
+         * anything times zero is zero. A lamp's FLUX and the sky's AMBIENT are
+         * both declared with a floor of 0, so dragging one all the way left
+         * used to land on exactly 0 and then STAY there for every drag after
+         * -- the row was dead until someone clicked it and typed a number.
+         *
+         * Checked on the fields the panel really builds, so a new row declared
+         * the same way is covered the day it is added. */
+        OsSettings s;
+        os_settings_default(&s);
+        /* The dome's rows only exist while the dome is the light source, and
+         * a lamp's only while one is selected. */
+        s.scene.light_mode = OS_LIGHT_AMBIENT;
+        s.sel_light = os_scenedesc_next_light(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int checked = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!f[i].logarithmic || f[i].readonly || f[i].is_enum) continue;
+            if (f[i].lo > 0.0) continue;               /* has its own floor */
+            checked++;
+
+            /* All the way to the bottom, however far anyone drags... */
+            double bottom = os_inspect_scrub(&f[i], f[i].value, -100000);
+            CHECK(bottom >= 0.0);
+            /* ...and one pixel back up moves it again. */
+            Field g = f[i]; g.value = bottom;
+            CHECK(os_inspect_scrub(&g, bottom, 1) > bottom);
+            /* A real drag gets somewhere useful rather than crawling out of a
+             * denormal: a stop is about 115 px, so 400 px is several. */
+            CHECK(os_inspect_scrub(&g, bottom, 400) > bottom * 4.0);
+        }
+        NOTE("%d zero-floored logarithmic rows, all recoverable", checked);
+        CHECK(checked >= 2);            /* the lamp's flux and the sky's lux */
+    }
+
+    SECTION("inspect: a continuous row is not scrubbed like an integer one");
+    {
+        /* The coarse whole-unit step exists for BLADES, which would otherwise
+         * need a 200-pixel drag to move by one. It used to be selected by the
+         * row's SPAN -- anything narrower than 32 -- which caught every
+         * continuous 0-to-1 row as well: the blade curvature and the three
+         * object colour channels crossed their entire range in twelve pixels,
+         * so an object's colour could not be adjusted at all. */
+        OsSettings s;
+        os_settings_default(&s);
+        s.sel_obj = os_scenedesc_next_object(&s.scene, 0);
+
+        Field f[OS_INSPECT_MAX];
+        int n = os_inspect_fields(&s, NULL, 0, f, OS_INSPECT_MAX);
+
+        int narrow = 0, coarse = 0;
+        for (int i = 0; i < n; ++i) {
+            if (f[i].heading || f[i].readonly || f[i].is_enum) continue;
+            if (f[i].logarithmic) continue;
+            if (f[i].hi - f[i].lo > 32.0) continue;
+            narrow++;
+
+            /* Ten pixels must not cross a whole range that is not an integer
+             * count -- which is the difference the old rule could not see. */
+            double moved = fabs(os_inspect_scrub(&f[i], f[i].value, 10)
+                                - f[i].value);
+            if (f[i].integral) { coarse++; CHECK(moved >= 0.5); }
+            else               CHECK(moved < (f[i].hi - f[i].lo) * 0.25);
+        }
+        NOTE("%d narrow rows, %d of them integer-valued", narrow, coarse);
+        CHECK(narrow > coarse);       /* there ARE continuous narrow rows */
+        CHECK(coarse >= 1);           /* and BLADES is still steppable    */
+    }
+
     SECTION("inspect: only the photograph's settings restart a render");
     {
         /* Turning the ray fan off must not throw away a converged image, and

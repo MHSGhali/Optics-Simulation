@@ -344,22 +344,33 @@ void os_test_scenedesc(void) {
 
     SECTION("scenedesc: the presets still describe the scenes they used to build");
     {
-        OsSceneDesc rail, bok;
+        OsSceneDesc rail, ring, bok;
         os_scenedesc_preset(&rail, OS_STAGE_DEPTH_RAIL);
+        os_scenedesc_preset(&ring, OS_STAGE_DEPTH_RING);
         os_scenedesc_preset(&bok,  OS_STAGE_BOKEH);
 
         /* Five targets and NOTHING ELSE, at the distances the depth-of-field
          * article depends on. No backdrop: a wall behind the subjects bounces
-         * light onto them and gives every silhouette a second edge. */
-        CHECK(os_scenedesc_count_objects(&rail) == 5);
-        CHECK(os_scenedesc_count_lights(&rail) == 1);
+         * light onto them and gives every silhouette a second edge.
+         *
+         * BOTH rails, and to the same depths -- they are one experiment in two
+         * arrangements, so anything that differs between them other than where
+         * the targets sit across the frame is a bug in one of them. */
         static const double WANT[] = { 1.0, 1.5, 2.0, 3.0, 5.0 };
-        for (int i = 0; i < 5; ++i)
-            CHECK_NEAR(os_scenedesc_depth(&rail, i), WANT[i], 1e-12);
+        const OsSceneDesc *both[2] = { &rail, &ring };
+        for (int k = 0; k < 2; ++k) {
+            CHECK(os_scenedesc_count_objects(both[k]) == 5);
+            CHECK(os_scenedesc_count_lights(both[k]) == 1);
+            for (int i = 0; i < 5; ++i)
+                CHECK_NEAR(os_scenedesc_depth(both[k], i), WANT[i], 1e-12);
+        }
 
-        CHECK(os_scenedesc_count_lights(&bok) == 12);
-        /* Bokeh is lamps against empty space -- no ground plane either. */
-        CHECK(os_scenedesc_count_objects(&bok) == 0);
+        /* Bokeh is no longer lamps against nothing: it has subjects now, in
+         * four depth layers, and the section below is about what those are
+         * for. Here it is only the shape of the thing -- objects AND lights,
+         * where the old scene had lights alone. */
+        CHECK(os_scenedesc_count_objects(&bok) > 0);
+        CHECK(os_scenedesc_count_lights(&bok) > 0);
 
         OsStage st;
         CHECK(os_scenedesc_build(&rail, &st));
@@ -367,6 +378,513 @@ void os_test_scenedesc(void) {
         CHECK(st.scene.nlights == 1);
         /* The markers carry the ground truth, against the prim actually built. */
         CHECK_NEAR(os_stage_depth(&st, "2M"), 2.0, 1e-12);
+        os_stage_free(&st);
+    }
+
+    SECTION("rail and ring: one experiment, two arrangements");
+    {
+        /* The pair exists to isolate FIELD POSITION, so the test is that field
+         * position is the only thing that differs between them. Everything
+         * else -- depths, sizes on the sensor, colours, lighting -- has to
+         * match, or a comparison between the two pictures is measuring
+         * something nobody intended. */
+        OsSceneDesc rail, ring;
+        os_scenedesc_preset(&rail, OS_STAGE_DEPTH_RAIL);
+        os_scenedesc_preset(&ring, OS_STAGE_DEPTH_RING);
+
+        for (int i = 0; i < 5; ++i) {
+            const OsObject *a = &rail.obj[i], *b = &ring.obj[i];
+            CHECK(a->alive && b->alive);
+            CHECK(strcmp(a->name, b->name) == 0);
+            /* Same depth, same colour. */
+            CHECK_NEAR(a->centre.z, b->centre.z, 1e-12);
+            for (int c = 0; c < 3; ++c) CHECK_NEAR(a->rgb[c], b->rgb[c], 1e-12);
+        }
+
+        /* ---- the ring is a ring ----
+         *
+         * Every target at the SAME angular radius, which is the entire reason
+         * the arrangement exists: equal field radius means equal field
+         * aberration, and equal field aberration cancels out of every
+         * comparison between them. One target nudged off the circle would
+         * quietly reintroduce the thing the ring was built to remove. */
+        ls_real r0 = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            const OsObject *o = &ring.obj[i];
+            ls_real z = -o->centre.z;
+            ls_real ang = sqrt(o->centre.x * o->centre.x
+                             + o->centre.y * o->centre.y) / z;
+            if (i == 0) r0 = ang; else CHECK_NEAR(ang, r0, 1e-12);
+            /* And the same angular SIZE, so they land the same size on the
+             * sensor whatever depth they sit at. */
+            CHECK_NEAR(o->radius / z, ring.obj[0].radius / (-ring.obj[0].centre.z),
+                       1e-12);
+        }
+        NOTE("the ring sits at %.4f rad off axis, all five", r0);
+        CHECK(r0 > 0.0);
+
+        /* Spread evenly around the circle, so no two crowd each other. On a
+         * regular pentagon neighbours are 2*R*sin(36 deg) = 1.176*R apart, and
+         * that has to clear two radii with room left over. */
+        ls_real ang_rad = ring.obj[0].radius / (-ring.obj[0].centre.z);
+        ls_real gap = 2.0 * r0 * sin(36.0 * LS_PI / 180.0) - 2.0 * ang_rad;
+        NOTE("neighbours clear each other by %.4f rad", gap);
+        CHECK(gap > 0.005);
+
+        /* ---- the row is a row ----
+         *
+         * Flat, spread sideways, and reaching much further off axis than the
+         * ring does -- which is the honest failing this arrangement is kept
+         * to demonstrate rather than a defect to fix. */
+        ls_real widest = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            CHECK_NEAR(rail.obj[i].centre.y, 0.0, 1e-12);
+            ls_real ang = fabs(rail.obj[i].centre.x) / (-rail.obj[i].centre.z);
+            if (ang > widest) widest = ang;
+        }
+        NOTE("the row reaches %.4f rad off axis, %.1fx the ring's radius",
+             widest, widest / r0);
+        CHECK(widest > r0 * 2.0);
+
+        /* ---- equal luminance, which is the other half of "identical" ----
+         *
+         * The eye reads brightness as sharpness, so a target that is darker
+         * than its neighbours is a second difference sitting on top of the one
+         * being measured. The colouring this replaced made the 2 m target --
+         * the one the default focus picks out -- 2.8x darker than the rest. */
+        ls_real lo = 1e9, hi = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            const ls_real *c = ring.obj[i].rgb;
+            ls_real y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            if (y < lo) lo = y;
+            if (y > hi) hi = y;
+        }
+        NOTE("target luminance spans %.4f to %.4f (%.2f%%)",
+             lo, hi, 100.0 * (hi / lo - 1.0));
+        CHECK(hi / lo < 1.01);
+
+        /* And they are actually different colours, not five names for grey --
+         * the other way to make five targets indistinguishable. */
+        int distinct = 0;
+        for (int i = 0; i < 5; ++i)
+            for (int j = i + 1; j < 5; ++j) {
+                ls_real d2 = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    ls_real dc = ring.obj[i].rgb[c] - ring.obj[j].rgb[c];
+                    d2 += dc * dc;
+                }
+                if (d2 > 0.04) distinct++;
+            }
+        CHECK(distinct == 10);          /* all ten pairs, not just some */
+    }
+
+    SECTION("grid: a chart that is straight, so the lens can bend it");
+    {
+        /* The distortion target, and the whole burden on the SCENE is that it
+         * is geometrically honest: the dots must be collinear and evenly
+         * spaced in object space, on one plane, or a bow in the picture is the
+         * chart's fault rather than the lens's. Whether the lens then bends it
+         * is os_lens_distortion_pct's business and is tested in test_lens. */
+        OsSceneDesc d;
+        os_scenedesc_preset(&d, OS_STAGE_GRID);
+
+        const int COLS = 9, ROWS = 7;
+        CHECK(os_scenedesc_count_objects(&d) == COLS * ROWS);
+
+        /* ---- one plane ---- */
+        ls_real z0 = d.obj[0].centre.z;
+        for (int i = 0; i < d.nobj; ++i) {
+            if (!d.obj[i].alive) continue;
+            CHECK_NEAR(d.obj[i].centre.z, z0, 1e-12);
+        }
+        CHECK(z0 < 0.0);
+
+        /* ---- collinear rows and columns, to the last bit ----
+         *
+         * Row-major order, so obj[r*COLS + c] is row r column c. Every dot in
+         * a row shares a y, every dot in a column shares an x. This is the
+         * property the whole target rests on. */
+        for (int r = 0; r < ROWS; ++r)
+            for (int c = 0; c < COLS; ++c) {
+                const OsObject *o = &d.obj[r * COLS + c];
+                CHECK_NEAR(o->centre.y, d.obj[r * COLS].centre.y, 1e-12);
+                CHECK_NEAR(o->centre.x, d.obj[c].centre.x, 1e-12);
+            }
+
+        /* ---- evenly spaced, which is what makes uneven spacing meaningful ----
+         *
+         * Even in METRES on a plane, which is even in tan(theta), which a
+         * rectilinear lens images to even spacing on the film. Anything else
+         * in the picture is the lens. */
+        ls_real dx = d.obj[1].centre.x - d.obj[0].centre.x;
+        ls_real dy = d.obj[COLS].centre.y - d.obj[0].centre.y;
+        CHECK(dx > 0.0 && dy > 0.0);
+        for (int c = 1; c < COLS; ++c)
+            CHECK_NEAR(d.obj[c].centre.x - d.obj[c - 1].centre.x, dx, 1e-12);
+        for (int r = 1; r < ROWS; ++r)
+            CHECK_NEAR(d.obj[r * COLS].centre.y - d.obj[(r - 1) * COLS].centre.y,
+                       dy, 1e-12);
+
+        /* Centred on the axis, so the middle dot marks where distortion is
+         * zero by definition. */
+        CHECK_NEAR(d.obj[(ROWS / 2) * COLS + COLS / 2].centre.x, 0.0, 1e-12);
+        CHECK_NEAR(d.obj[(ROWS / 2) * COLS + COLS / 2].centre.y, 0.0, 1e-12);
+
+        /* ---- the dots do not touch ---- */
+        ls_real rad = d.obj[0].radius;
+        CHECK(rad > 0.0);
+        CHECK(dy - 2.0 * rad > 0.05);
+        NOTE("grid: %dx%d dots, %.3f x %.3f m apart, radius %.3f m, on one "
+             "plane at %.2f m", COLS, ROWS, dx, dy, rad, -z0);
+
+        /* ---- and it fills a frame worth looking at ----
+         *
+         * Sized for 35 mm: the chart's angular extent is fixed once its metres
+         * are, and no chart of this many dots can be dense at 100 mm and full
+         * at 24. The check is that the corner reaches a field angle where
+         * these designs actually distort -- below about 0.3 rad there is
+         * nothing to see on any of them. */
+        ls_real hw = d.obj[COLS - 1].centre.x, hh = d.obj[(ROWS-1)*COLS].centre.y;
+        ls_real corner = sqrt(hw * hw + hh * hh) / (-z0);
+        NOTE("grid: the corner sits %.3f rad off axis", corner);
+        CHECK(corner > 0.3);
+
+        /* ---- and no lamp is in shot, at ANY focal length ----
+         *
+         * Both sit BEHIND the camera, at positive z. A camera ray leaves the
+         * film travelling toward -z and can never reach them, whatever the
+         * focal length -- which is a stronger guarantee than the bokeh scene's
+         * overhead rig can give, and the right one for a chart, because it
+         * also puts the light frontal so no dot has a terminator to be
+         * mistaken for a shift in position. */
+        int nlit = 0;
+        for (int i = 0; i < d.nlit; ++i) {
+            if (!d.lit[i].alive) continue;
+            nlit++;
+            CHECK(d.lit[i].centre.z > 0.0);
+        }
+        CHECK(nlit == 2);
+    }
+
+    SECTION("bokeh: a field of depth, and one focus setting that sorts it");
+    {
+        /* WHAT THIS STAGE IS, and why it is worth testing.
+         *
+         * It is a field of ordinary objects spread from half a metre to
+         * fourteen, one thin layer of which is sharp -- so the blur can be
+         * watched growing in both directions from the focus plane, on surfaces
+         * that have shading and colour and occlusion rather than on bare
+         * highlights. The checks below pin the parts of that a nudged number in
+         * the table would quietly break and no test could otherwise see.
+         *
+         * The ten background lamps that used to make blur DISCS are gone. The
+         * iris shape they showed is a real subject, and it is checked where it
+         * belongs -- on the pupil, in test_lens -- rather than requiring this
+         * scene to keep a lamp grid in it. */
+        OsSceneDesc d;
+        os_scenedesc_preset(&d, OS_STAGE_BOKEH);
+
+        /* The focus the docs render uses. Everything below is stated relative
+         * to it rather than to an absolute distance, so moving the whole scene
+         * would not silently invalidate the test. */
+        const ls_real FOCUS = 1.2;
+
+        /* ---- no light is in shot, AT ANY FOCAL LENGTH ----
+         *
+         * THE structural rule, and the one a dragged lamp breaks first. A
+         * source inside the frame is photographed, and a source of these
+         * fluxes photographed is a blown white ellipse sitting on top of
+         * whatever it was lighting.
+         *
+         * Checked across the whole focal range the viewer offers, because the
+         * first arrangement passed at 100 mm and failed everywhere below it: a
+         * 36 x 24 mm frame subtends +/-0.18 by +/-0.12 rad at 100 mm but
+         * +/-1.50 by +/-1.00 at 12 mm, so lamps parked just outside a long
+         * lens's frame sail into a short one's. Testing the single default
+         * focal length is what let that ship. */
+        static const ls_real FOCAL[] = { 12.0, 24.0, 35.0, 50.0, 100.0, 400.0 };
+        int nlit = 0;
+        ls_real tightest = HUGE_VAL;
+        for (int i = 0; i < d.nlit; ++i) {
+            if (!d.lit[i].alive) continue;
+            nlit++;
+            ls_real z = -d.lit[i].centre.z;
+            CHECK(z > 0.0);
+            for (size_t k = 0; k < sizeof FOCAL / sizeof FOCAL[0]; ++k) {
+                /* Half-angles of a 36 x 24 mm frame at this focal length. */
+                ls_real hx = 18.0 / FOCAL[k], hy = 12.0 / FOCAL[k];
+                bool in_shot = fabs(d.lit[i].centre.x) < hx * z
+                            && fabs(d.lit[i].centre.y) < hy * z;
+                CHECK(!in_shot);
+            }
+            /* How wide the lens could go before this one appears -- reported
+             * so the margin is visible rather than merely asserted. */
+            ls_real ax = fabs(d.lit[i].centre.x) / z;
+            ls_real ay = fabs(d.lit[i].centre.y) / z;
+            ls_real fx = ax > 0.0 ? 18.0 / ax : HUGE_VAL;
+            ls_real fy = ay > 0.0 ? 12.0 / ay : HUGE_VAL;
+            ls_real f  = fx < fy ? fx : fy;
+            if (f < tightest) tightest = f;
+        }
+        NOTE("%d lamps, all out of frame down to %.1f mm -- past the 12 mm the "
+             "viewer allows", nlit, tightest);
+        CHECK(tightest < 12.0);
+        /* Enough of them to cover the depth range: one key cannot, because
+         * illuminance falls as one over r squared and by 14 m a lamp placed for
+         * the subject has a four-hundredth of its output left. */
+        CHECK(nlit >= 3);
+
+        /* ---- the field is deep, and populated all the way through ---- */
+        int near = 0, at = 0, far = 0, deep = 0;
+        ls_real nearest = HUGE_VAL, furthest = 0.0;
+        for (int i = 0; i < d.nobj; ++i) {
+            if (!d.obj[i].alive) continue;
+            ls_real z = os_scenedesc_depth(&d, i);
+            CHECK(z > 0.0);                     /* nothing behind the camera  */
+            if (z < nearest)  nearest = z;
+            if (z > furthest) furthest = z;
+            if      (z < FOCUS * 0.75) near++;
+            else if (z > FOCUS * 6.0)  deep++;
+            else if (z > FOCUS * 1.5)  far++;
+            else                       at++;
+        }
+        /* Counted by DEPTH alone -- "at the focus depth" is not the same as
+         * "sharp", since the peripheral field has objects at every depth and
+         * none of them are near the axis. The sharp count is nsharp, below. */
+        NOTE("bokeh field: %.2f m to %.1f m -- %d foreground, %d at the focus "
+             "depth, %d behind, %d deep", nearest, furthest, near, at, far, deep);
+        CHECK(near >= 2);      /* a foreground, blurred on the OTHER side     */
+        CHECK(at   >= 3);      /* something sharp, or "blurred" means nothing */
+        CHECK(far  >= 4);      /* the middle of the range, not just its ends  */
+        CHECK(deep >= 3);      /* past the knee, where blur stops growing     */
+        CHECK(furthest / nearest > 20.0);
+
+        /* ---- various in size, and in APPARENT size ----
+         *
+         * Two ways to be the same, and both would spoil it. Equal physical
+         * radii make a scene of one ball at many distances; equal angular radii
+         * make a wall of identical discs. The table is authored in angles, so
+         * the second is the one to guard, and the first follows from the depth
+         * spread above. */
+        ls_real amin = HUGE_VAL, amax = 0.0, rmin = HUGE_VAL, rmax = 0.0;
+        for (int i = 0; i < d.nobj; ++i) {
+            if (!d.obj[i].alive) continue;
+            ls_real z = os_scenedesc_depth(&d, i);
+            ls_real a = d.obj[i].radius / z;
+            if (a < amin) amin = a;
+            if (a > amax) amax = a;
+            if (d.obj[i].radius < rmin) rmin = d.obj[i].radius;
+            if (d.obj[i].radius > rmax) rmax = d.obj[i].radius;
+        }
+        NOTE("radii: %.3f-%.3f m physical (%.1fx), %.3f-%.3f rad apparent (%.1fx)",
+             rmin, rmax, rmax / rmin, amin, amax, amax / amin);
+        CHECK(rmax / rmin > 5.0);
+        CHECK(amax / amin > 3.0);
+
+        /* ---- and various in colour ----
+         *
+         * Saturated enough that the hue survives the rgb -> spectrum uplift,
+         * which pulls everything toward neutral, and spread widely enough that
+         * no two objects read as the same paint. */
+        int coloured = 0, framed = 0, pairs = 0, close = 0, distinct = 0;
+        for (int i = 0; i < d.nobj; ++i) {
+            if (!d.obj[i].alive) continue;
+            ls_real lo = d.obj[i].rgb[0], hi = d.obj[i].rgb[0];
+            for (int c = 1; c < 3; ++c) {
+                lo = d.obj[i].rgb[c] < lo ? d.obj[i].rgb[c] : lo;
+                hi = d.obj[i].rgb[c] > hi ? d.obj[i].rgb[c] : hi;
+            }
+            if (hi - lo > 0.1) coloured++;
+
+            /* Distinct across the whole field, counted once each. */
+            bool seen = false;
+            for (int j = 0; j < i; ++j) {
+                if (!d.obj[j].alive) continue;
+                ls_real d2 = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    ls_real dc = d.obj[i].rgb[c] - d.obj[j].rgb[c];
+                    d2 += dc * dc;
+                }
+                if (d2 < 0.01) seen = true;
+            }
+            if (!seen) distinct++;
+
+            /* And PAIRWISE distinct among the ones that share the 100 mm
+             * frame, which is where two identical paints would actually be
+             * seen side by side. The peripheral field cycles a palette and
+             * repeats it, which is fine at 0.5 rad off axis and would be a
+             * waste of thirty-two hand-picked colours. */
+            ls_real zi = os_scenedesc_depth(&d, i);
+            if (!(fabs(d.obj[i].centre.x) < 0.18 * zi
+               && fabs(d.obj[i].centre.y) < 0.12 * zi)) continue;
+            framed++;
+            for (int j = 0; j < i; ++j) {
+                if (!d.obj[j].alive) continue;
+                ls_real zj = os_scenedesc_depth(&d, j);
+                if (!(fabs(d.obj[j].centre.x) < 0.18 * zj
+                   && fabs(d.obj[j].centre.y) < 0.12 * zj)) continue;
+                ls_real d2 = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    ls_real dc = d.obj[i].rgb[c] - d.obj[j].rgb[c];
+                    d2 += dc * dc;
+                }
+                pairs++;
+                if (d2 < 0.01) close++;
+            }
+        }
+        NOTE("%d of %d objects carry a hue, %d distinct colours; of the %d in "
+             "the 100 mm frame, %d of %d pairs are near-identical",
+             coloured, os_scenedesc_count_objects(&d), distinct, framed,
+             close, pairs);
+        CHECK(coloured >= 12);
+        CHECK(distinct >= 20);
+        CHECK(close == 0);
+
+        /* ---- and the optics sort the field the way the table says ----
+         *
+         * The layers are only worth having if the LENS separates them, so this
+         * is asked of os_lens_coc_mm at the focus the docs render uses. A
+         * SEPARATION rather than an absolute: the worst-blurred thing on the
+         * focus plane is several times sharper than the best-focused thing off
+         * it. An absolute threshold would be measuring the lens -- at 1.2 m
+         * this achromat is aberration-limited and its on-axis spot is already
+         * wider than the 0.030 mm the panel calls sharp. */
+        char why[256];
+        OsLens L;
+        CHECK(os_lens_build(&L, OS_LENS_ACHROMAT_100, 100.0, 5.0, why, sizeof why));
+        L.blades = 6;
+        CHECK(os_lens_set_fnumber(&L, 5.0));
+        CHECK(os_lens_focus(&L, FOCUS));
+
+        /* "In the sharp layer" takes BOTH a depth and a field angle, because
+         * sharpness does. The achromat covers a 20 mm image circle, so past
+         * 0.10 rad off axis it is soft no matter how well it is focused -- and
+         * the peripheral field has objects at every depth including this one.
+         * Testing on depth alone would ask a sphere 0.5 rad off axis to be
+         * sharp because it happens to sit at 1.6 m, which is a question about
+         * the test rather than about the scene. */
+        int nsharp = 0;
+        ls_real worst_sharp = 0.0, best_blur = HUGE_VAL;
+        for (int i = 0; i < d.nobj; ++i) {
+            if (!d.obj[i].alive) continue;
+            ls_real z   = os_scenedesc_depth(&d, i);
+            ls_real coc = os_lens_coc_mm(&L, z);
+            ls_real h   = sqrt(d.obj[i].centre.x * d.obj[i].centre.x
+                             + d.obj[i].centre.y * d.obj[i].centre.y);
+            bool on_axis = h / z < 0.10;
+            if (z >= FOCUS * 0.75 && z <= FOCUS * 1.5 && on_axis) {
+                nsharp++;
+                if (coc > worst_sharp) worst_sharp = coc;
+                /* And "sharp" is the traced ray's opinion too, not only the
+                 * paraxial model's. */
+                CHECK(os_lens_spot_mm(&L, z, h, 11) < 0.30);
+            } else if (z < FOCUS * 0.75 || z > FOCUS * 1.5) {
+                /* Only DEPTH disqualifies something from being the reference
+                 * for "blurred". A near-axis object at the focus distance that
+                 * is soft for a field reason would be neither, and there are
+                 * none -- nsharp below is the count that says so. */
+                if (coc < best_blur) best_blur = coc;
+            }
+        }
+        CHECK(nsharp == 3);
+        NOTE("focused at %.1f m: the sharp layer blurs to at most %.3f mm, "
+             "everything else to at least %.3f mm", FOCUS, worst_sharp, best_blur);
+        CHECK(best_blur > worst_sharp * 4.0);
+
+        /* ---- the far end is past the knee ----
+         *
+         * Blur asymptotes: an object at infinity images a fixed distance from
+         * the focused one, so past a certain depth extra distance stops buying
+         * softness. The deep layer is there to sit on the far side of that, and
+         * the check is that it does -- its blur is within a few per cent of the
+         * limit, so those objects differ from each other in BRIGHTNESS rather
+         * than in sharpness. Lose that and the scene's back half is just more
+         * of its middle. */
+        ls_real at_infinity = os_lens_coc_mm(&L, HUGE_VAL);
+        ls_real deepest = os_lens_coc_mm(&L, furthest);
+        NOTE("blur at %.0f m is %.3f mm against %.3f mm at infinity (%.0f%% of "
+             "the way there)", furthest, deepest, at_infinity,
+             100.0 * deepest / at_infinity);
+        CHECK(deepest > at_infinity * 0.9);
+        CHECK(deepest < at_infinity);
+    }
+
+    SECTION("bokeh: the whole field shares one exposure");
+    {
+        /* The stage used to need an exposure of its own. Twelve sources of
+         * 5800 lm against black put the brightest pixel about 1400x over white
+         * at the default gain of 100, so the docs render passed --exposure 0.2
+         * -- and at 0.2 anything that was not a lamp was black, which is a
+         * large part of why nothing else was in the scene.
+         *
+         * Now there are no bare sources at all, and the four lamps are aimed at
+         * the rail's own level, so the default gain serves this stage as it
+         * serves the others: nothing clips, and the deep end is still visible
+         * rather than crushed. Both halves of that are load-bearing -- a scene
+         * that fits the range by being uniformly grey would pass a check on
+         * either one alone -- so both are checked, along with the spread
+         * between them. */
+        const int W = 96, H = 64;
+        const ls_real EXPOSURE = 100.0;     /* the viewer's default, unmodified */
+
+        OsSceneDesc d;
+        os_scenedesc_preset(&d, OS_STAGE_BOKEH);
+        OsStage st;
+        CHECK(os_scenedesc_build(&d, &st));
+
+        char why[256];
+        OsCamera cam;
+        CHECK(os_camera_build(&cam, OS_LENS_ACHROMAT_100, 100.0, 5.0,
+                              36.0, W, H, why, sizeof why));
+        cam.lens.blades = 6;
+        CHECK(os_lens_focus(&cam.lens, 1.2));
+        os_camera_refresh(&cam);
+        os_camera_look_at(&cam, st.cam_eye, st.cam_target, v3(0, 1, 0));
+
+        Film film;
+        CHECK(ls_film_init(&film, W, H));
+        OsRenderOpts opt = { 128, 4, 0, 0x853C49E6748FEA9Bull };
+        os_render_pass(&film, &cam, &st, &opt, 0);
+
+        ls_real hi = 0.0, sum = 0.0;
+        int lit = 0, blown = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                Spectrum sp = ls_film_mean(&film, x, y);
+                ls_real Y = ls_spectrum_to_xyz(&sp).y * EXPOSURE;
+                if (Y > hi) hi = Y;
+                if (Y > 1.0) blown++;
+                sum += Y;
+                if (Y > 0.02) lit++;           /* plainly not background */
+            }
+        ls_real mean = sum / (ls_real)(W * H);
+        NOTE("at the default exposure: peak %.2f, mean %.4f, %d%% of the frame "
+             "above 0.02, %d pixels over white", hi, mean,
+             100 * lit / (W * H), blown);
+
+        /* NOTHING clips. There is no highlight in this scene to justify one --
+         * every surface is a Lambertian reflector under a placed lamp, so a
+         * blown pixel here would mean a lamp too close or too strong rather
+         * than anything the picture is about.
+         *
+         * And the margin is bigger than it looks: a MAX over six thousand
+         * pixels is the noisiest statistic there is, so at this sample count
+         * the peak reads about 0.88 where the converged value is 0.64. The
+         * claim survives the noise, which is the point of making it on the
+         * max rather than on a percentile. */
+        CHECK(hi < 1.0);
+        CHECK(blown == 0);
+        /* But it uses the range rather than hiding in the bottom of it. */
+        CHECK(hi > 0.4);
+        /* And a third of the frame is subject that can be SEEN rather than
+         * black -- the check the old lamps-against-nothing scene could never
+         * have passed, and the one that fails if a lamp is lost or the field
+         * collapses toward the camera. */
+        CHECK(lit * 100 / (W * H) > 25);
+        CHECK(mean > 0.02);
+
+        ls_film_free(&film);
+        os_camera_free(&cam);
         os_stage_free(&st);
     }
 }

@@ -12,6 +12,16 @@ void os_pupil_free(OsPupilCache *c) {
     free(c->zone);
     c->zone = NULL;
     c->nzones = 0;
+    c->rear_semi_mm = 0.0;
+}
+
+void os_pupil_init_trivial(OsPupilCache *c, const OsLens *L) {
+    free(c->zone);
+    c->zone = NULL;
+    c->nzones = 0;
+    c->film_radius_mm = 0.0;
+    c->rear_z_mm    = os_lens_vertex_z(L, L->nsurf - 1);
+    c->rear_semi_mm = L->surf[L->nsurf - 1].semi_ap_mm;
 }
 
 bool os_pupil_build(OsPupilCache *c, const OsLens *L, ls_real film_radius_mm,
@@ -22,9 +32,10 @@ bool os_pupil_build(OsPupilCache *c, const OsLens *L, ls_real film_radius_mm,
     c->nzones = nzones;
     c->film_radius_mm = film_radius_mm;
     c->rear_z_mm = os_lens_vertex_z(L, L->nsurf - 1);
+    c->rear_semi_mm = L->surf[L->nsurf - 1].semi_ap_mm;
 
     ls_real film_z = os_lens_film_z(L);
-    ls_real rear_semi = L->surf[L->nsurf - 1].semi_ap_mm;
+    ls_real rear_semi = c->rear_semi_mm;
 
     for (int z = 0; z < nzones; ++z) {
         /* One representative sensor point per zone, on the +x axis. Rotational
@@ -79,7 +90,16 @@ bool os_pupil_build(OsPupilCache *c, const OsLens *L, ls_real film_radius_mm,
 }
 
 OsRect os_pupil_bounds(const OsPupilCache *c, ls_real r_mm) {
-    if (c->nzones <= 0) return (OsRect){ 0, 0, 0, 0 };
+    if (c->nzones <= 0) {
+        /* No table: fall back to the whole rear element, which is the loosest
+         * bound that still CONTAINS the pupil and therefore still satisfies
+         * this module's invariant. Slower, never darker. A cache that has not
+         * even been given a lens has no rear element to name and gets the
+         * empty box, which is the only honest answer to a question about a
+         * lens that is not there. */
+        ls_real h = c->rear_semi_mm;
+        return (OsRect){ -h, h, -h, h };
+    }
     ls_real t = (c->film_radius_mm > 0.0) ? r_mm / c->film_radius_mm : 0.0;
     if (t < 0.0) t = 0.0;
     if (t > 1.0) t = 1.0;
@@ -104,7 +124,7 @@ OsRect os_pupil_bounds(const OsPupilCache *c, ls_real r_mm) {
 bool os_pupil_sample(const OsPupilCache *c, ls_real fx_mm, ls_real fy_mm,
                      ls_real u1, ls_real u2,
                      ls_real *rx_mm, ls_real *ry_mm, ls_real *area_mm2) {
-    if (c->nzones <= 0) return false;
+    if (c->nzones <= 0 && !(c->rear_semi_mm > 0.0)) return false;
 
     ls_real r = sqrt(fx_mm * fx_mm + fy_mm * fy_mm);
     OsRect b = os_pupil_bounds(c, r);

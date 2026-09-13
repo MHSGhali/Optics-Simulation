@@ -55,19 +55,450 @@ void os_test_lens(void) {
         OsLens t;
         CHECK(os_lens_build(&t, OS_LENS_THIN, 0.0, 0.0, why, sizeof why));
         CHECK_NEAR(t.efl_mm, 100.0, 1e-12);
-        CHECK_NEAR(t.bfd_mm, 100.0, 1e-12);
-        CHECK_NEAR(t.pp_rear_mm, 0.0, 1e-12);
 
         /* Zero dispersion: F, d and C focus at the same place exactly. */
         CHECK(os_lens_efl_at(&t, OS_LINE_F) == os_lens_efl_at(&t, OS_LINE_C));
         for (ls_real l = 380.0; l <= 780.0; l += 10.0)
             CHECK_NEAR(os_lens_efl_at(&t, l), 100.0, 1e-12);
 
+        /* ---- and it is 20 mm long, which the numbers below are about ----
+         *
+         * The design's two surfaces used to share a vertex, and the sphere's
+         * cap bulges 13.4 mm past that vertex at the full clear aperture, so
+         * the plano sat inside the sphere and every traced ray came back
+         * vignetted. See build_thin. They are 20 mm apart now, and these two
+         * numbers are the entire optical price of the gap:
+         *
+         *   BACK FOCAL DISTANCE   100 -> 90
+         *   REAR PRINCIPAL PLANE    0 -> -10
+         *
+         * Both are POSITIONS. The power is untouched -- a plano contributes
+         * none at any thickness -- which is why the focal length above is
+         * still exact to the last bit at every wavelength, and why the circle
+         * of confusion is unchanged too: the rear principal plane and the exit
+         * pupil each move back by the same 10 mm, and the lever between them
+         * is what a blur is measured on. test_camera's textbook comparison
+         * asserts that at 1e-9 and did not need touching. */
+        CHECK_NEAR(t.bfd_mm, 90.0, 1e-12);
+        CHECK_NEAR(t.pp_rear_mm, -10.0, 1e-12);
+
+        /* Collapse the gap and the textbook thin lens is exactly what is left,
+         * which is the claim the two numbers above would otherwise obscure. */
+        OsLens flat = t;
+        collapse(&flat);
+        CHECK_NEAR(flat.efl_mm, 100.0, 1e-12);
+        CHECK_NEAR(flat.bfd_mm, 100.0, 1e-12);
+        CHECK_NEAR(flat.pp_rear_mm, 0.0, 1e-12);
+
         /* And it scales like anything else. */
         CHECK(os_lens_build(&t, OS_LENS_THIN, 35.0, 2.0, why, sizeof why));
         CHECK_NEAR(t.efl_mm, 35.0, 1e-12);
         CHECK_NEAR(t.f_number, 2.0, 1e-12);
         CHECK_NEAR(2.0 * t.ep_semi_ap_mm, 17.5, 1e-12);
+        /* The gap scales with everything else, so the BFD stays 0.9 f. */
+        CHECK_NEAR(t.bfd_mm, 31.5, 1e-12);
+    }
+
+    SECTION("lens: every shipped design actually passes light");
+    {
+        /* THE test the ideal lens needed and did not have.
+         *
+         * Its two surfaces shared a vertex while the first bulged 13.4 mm past
+         * it, so a sequential trace -- which visits surfaces in prescription
+         * order, not in hit order -- reached the second one having already
+         * flown through where the first was, and found it behind itself. Every
+         * ray came back vignetted and the design rendered pure BLACK, from the
+         * CLI and in the viewer both.
+         *
+         * It survived for as long as it did because every test here was
+         * paraxial: the y-nu trace walks surfaces arithmetically and never asks
+         * where they are. So this one traces real rays, in both directions,
+         * through every shipped design -- the cheapest possible statement that
+         * a lens is a lens and not a wall. */
+        for (int id = 0; id < OS_LENS_COUNT; ++id) {
+            OsLens L;
+            CHECK(os_lens_build(&L, (OsPrescriptionId)id, 100.0, 5.0,
+                                why, sizeof why));
+            CHECK(os_lens_focus(&L, 2.0));
+
+            ls_real film_z = os_lens_film_z(&L);
+            ls_real rear_z = os_lens_vertex_z(&L, L.nsurf - 1);
+            int out = 0, in = 0;
+            const int N = 40;
+            for (int i = 0; i < N; ++i) {
+                /* Across the pupil, stopping short of its rim so the count is
+                 * about the geometry rather than about the clip. */
+                ls_real h = ((ls_real)i / (ls_real)N) * L.ep_semi_ap_mm * 0.9;
+
+                OsLensRay r = { v3(0.0, 0.0, film_z),
+                                v3norm(v3sub(v3(h, 0.0, rear_z),
+                                             v3(0.0, 0.0, film_z))) };
+                if (os_lens_trace_reverse(&L, OS_LINE_D, &r, NULL)) out++;
+
+                /* And the other way, from a subject at 2 m toward the pupil. */
+                vec3 o = v3(0.0, 0.0, -2000.0);
+                OsLensRay f = { o, v3norm(v3sub(v3(h, 0.0, L.ep_z_mm), o)) };
+                if (os_lens_trace(&L, OS_LINE_D, &f, NULL)) in++;
+            }
+            NOTE("%s: %d/%d rays out, %d/%d in",
+                 os_prescription_name((OsPrescriptionId)id), out, N, in, N);
+            CHECK(out > N / 2);
+            CHECK(in  > N / 2);
+        }
+    }
+
+    SECTION("lens: the ideal design is ideal in COLOUR, not in its rays");
+    {
+        /* Two comments and a user-visible string used to call it
+         * aberration-free. It is a single spherical surface, which is not
+         * aplanatic: at f/5 it leaves MORE spherical aberration than the
+         * achromat, whose second element bends the marginal rays back. What it
+         * really guarantees is an exact focal length and no colour, and the
+         * difference matters to anyone choosing it to look at a lens's best
+         * case. Pinned so the claim cannot come back. */
+        OsLens ideal, achromat;
+        CHECK(os_lens_build(&ideal, OS_LENS_THIN, 100.0, 5.0, why, sizeof why));
+        CHECK(os_lens_build(&achromat, OS_LENS_ACHROMAT_100, 100.0, 5.0,
+                            why, sizeof why));
+        CHECK(os_lens_focus(&ideal, 2.0));
+        CHECK(os_lens_focus(&achromat, 2.0));
+
+        ls_real si = os_lens_spot_mm(&ideal, 2.0, 0.0, 21);
+        ls_real sa = os_lens_spot_mm(&achromat, 2.0, 0.0, 21);
+        NOTE("on axis at f/5: ideal %.4f mm, achromat %.4f mm", si, sa);
+        CHECK(isfinite(si) && isfinite(sa));
+        CHECK(si > sa);
+
+        /* And stopping down cleans it up, which is what identifies the cause
+         * as SPHERICAL aberration rather than as anything chromatic -- the
+         * design has no colour to correct. */
+        OsLens stopped;
+        CHECK(os_lens_build(&stopped, OS_LENS_THIN, 100.0, 16.0,
+                            why, sizeof why));
+        CHECK(os_lens_focus(&stopped, 2.0));
+        ls_real ss = os_lens_spot_mm(&stopped, 2.0, 0.0, 21);
+        NOTE("the same design at f/16: %.4f mm", ss);
+        CHECK(ss < si / 10.0);
+    }
+
+    SECTION("lens: a design reports the widest it can actually open");
+    {
+        /* The number the OPEN control needs and did not have. The viewer used
+         * to hard-code a floor of f/1 and let the aperture walk past the point
+         * where the iris is already against the bore -- on the achromat, which
+         * is wide open a hair inside the f/5 the viewer starts on, so the
+         * first thing anyone tried moved a number and changed no photograph.
+         *
+         * The achromat's stop is its front surface with nothing in front of it
+         * to magnify, so the widest pupil is that surface's clear aperture and
+         * the limit is the focal length over its diameter.
+         *
+         * NEAR f/5 and not exactly f/5, which is worth knowing: the table says
+         * 10 mm of semi-aperture at a design focal length of 100 mm, but
+         * os_lens_build rescales every length so the MEASURED paraxial focal
+         * length is 100 -- and the design equations are thin-lens ones, so a
+         * real doublet with 4 mm and 2.5 mm elements comes out 0.36 % short
+         * and its aperture is scaled up with it. The design's nominal
+         * f-number is a label; this is the aperture. */
+        OsLens L;
+        CHECK(os_lens_build(&L, OS_LENS_ACHROMAT_100, 100.0, 5.0,
+                            why, sizeof why));
+        ls_real widest = os_lens_min_fnumber(&L);
+        NOTE("the achromat is wide open at f/%.4f, against a nominal f/5",
+             widest);
+        CHECK(widest > 4.9 && widest < 5.0);
+        CHECK_NEAR(widest,
+                   L.efl_mm / (2.0 * L.surf[L.stop_index].semi_ap_mm), 1e-12);
+
+        /* And it is the value the clamp actually enforces, which is the claim
+         * that matters -- the two are computed by different code. */
+        CHECK(os_lens_set_fnumber(&L, 1.4));
+        CHECK_NEAR(L.f_number, widest, 1e-12);
+
+        /* Scale-invariant: every length moves together, so the ratio does not.
+         * A 200 mm achromat is exactly as fast as a 100 mm one. */
+        CHECK(os_lens_build(&L, OS_LENS_ACHROMAT_100, 200.0, 5.0,
+                            why, sizeof why));
+        CHECK_NEAR(os_lens_min_fnumber(&L), widest, 1e-12);
+
+        /* Stopping down is never clamped, so the report is unchanged by it. */
+        CHECK(os_lens_set_fnumber(&L, 22.0));
+        CHECK_NEAR(L.f_number, 22.0, 1e-12);
+        CHECK_NEAR(os_lens_min_fnumber(&L), widest, 1e-12);
+    }
+
+    SECTION("lens: a zoom changes its design, where the others are scaled");
+    {
+        /* THE distinction this design exists to make.
+         *
+         * Every other prescription here reaches another focal length by
+         * SCALING -- multiply every length by k and you have a real lens of
+         * the same form, with every angle unchanged and therefore every
+         * aberration identical. That is a genuine optical operation, and it is
+         * also why a scaled design's character never moves however far the
+         * control is dragged.
+         *
+         * A zoom is not that. Its groups sit at a separation, every separation
+         * is a different lens, and the aberrations move because the design
+         * moved. The checks below are that claim, stated four ways. */
+        char why[256];
+        static const double F[4] = { 45.0, 60.0, 80.0, 100.0 };
+        ls_real track[4], distort[4], colour[4];
+
+        for (int i = 0; i < 4; ++i) {
+            OsLens L;
+            CHECK(os_lens_build(&L, OS_LENS_ZOOM_RETRO, F[i], 5.6,
+                                why, sizeof why));
+            /* The separation is SOLVED against the paraxial trace, so landing
+             * on the requested focal length is the check that the solve
+             * converged -- not a tautology, because the thin-lens identity it
+             * started from is 14 % out at the long end. */
+            CHECK_NEAR(L.efl_mm, F[i], 1e-6);
+            CHECK(os_lens_focus(&L, 3.0));
+
+            track[i]   = L.total_track_mm;
+            distort[i] = os_lens_distortion_pct(&L, 21.63);
+            colour[i]  = 100.0 * (os_lens_efl_at(&L, OS_LINE_F)
+                                - os_lens_efl_at(&L, OS_LINE_C)) / L.efl_mm;
+            NOTE("zoom at %5.1f mm: track %6.2f mm, distortion %+7.2f %%, "
+                 "colour %+6.3f %%", F[i], track[i], distort[i], colour[i]);
+        }
+
+        /* ---- 1. the glass actually MOVED ----
+         * A scaled design's track is proportional to its focal length. This
+         * one's runs the other way: the groups separate as it goes wide, so
+         * the short setting is the LONG lens. Nothing that merely rescales can
+         * do that. */
+        CHECK(track[0] > track[3]);
+        NOTE("the 45 mm setting is %.2fx longer than the 100 mm one",
+             track[0] / track[3]);
+        CHECK(track[0] / track[3] > 1.5);
+
+        /* ---- 2. the distortion sweeps, monotonically ----
+         * Barrel throughout, and growing hard toward the wide end because the
+         * stop sits further behind the negative front group at every step. */
+        for (int i = 0; i < 4; ++i) CHECK(distort[i] < 0.0);
+        for (int i = 1; i < 4; ++i) CHECK(distort[i] > distort[i - 1]);
+        NOTE("distortion sweeps %.1fx across the range",
+             distort[0] / distort[3]);
+        CHECK(distort[0] / distort[3] > 4.0);
+
+        /* ---- 3. but the COLOUR does not move, and that is the good news ----
+         *
+         * I expected the residual to sweep with the separation and it does
+         * not: -0.704 % at the wide end against -0.692 % at the long one, a
+         * fiftieth of the distortion's swing. Each group is achromatic on its
+         * own, so what is left is their own secondary spectrum, and that
+         * travels with the glass rather than with the gap. A zoom that held
+         * its geometry and lost its colour correction would be a bad zoom;
+         * this one is the other way round.
+         *
+         * The level is another matter: -0.70 % against the ACHROMAT's
+         * -0.058 %, twelve times worse, because the two groups carry far more
+         * power than their sum and each one's residual is proportional to its
+         * own. That is the price of building a zoom out of two doublets, and
+         * it is a measurement rather than an apology. */
+        CHECK(fabs(colour[0] - colour[3]) < 0.05);
+        for (int i = 0; i < 4; ++i) CHECK(fabs(colour[i]) > 0.3);
+
+        /* ---- 4. the contrast, measured against a design that scales ----
+         * The achromat at the same two focal lengths keeps its character to
+         * the last bit, because scaling preserves every angle. The zoom does
+         * not. That is the whole difference between resizing a lens and
+         * rebuilding one. */
+        OsLens a45, a100;
+        CHECK(os_lens_build(&a45,  OS_LENS_ACHROMAT_100, 45.0,  5.6, why, sizeof why));
+        CHECK(os_lens_build(&a100, OS_LENS_ACHROMAT_100, 100.0, 5.6, why, sizeof why));
+        CHECK(os_lens_focus(&a45, 3.0));
+        CHECK(os_lens_focus(&a100, 3.0));
+        ls_real c45  = 100.0 * (os_lens_efl_at(&a45,  OS_LINE_F)
+                              - os_lens_efl_at(&a45,  OS_LINE_C)) / a45.efl_mm;
+        ls_real c100 = 100.0 * (os_lens_efl_at(&a100, OS_LINE_F)
+                              - os_lens_efl_at(&a100, OS_LINE_C)) / a100.efl_mm;
+        CHECK_NEAR(c45, c100, 1e-12);            /* scaled: identical         */
+        /* The zoom's DISTORTION is what moves; its colour is held. */
+        CHECK(fabs(distort[0] - distort[3]) > 1.0);
+        /* And the track scales exactly, which is the same statement about
+         * lengths that the colour check makes about angles. */
+        CHECK_NEAR(a45.total_track_mm / a100.total_track_mm, 0.45, 1e-9);
+
+        /* ---- and it refuses what its mechanism cannot reach ----
+         * Both ends, for different reasons: the long end is the groups
+         * colliding, the wide end is the front element ceasing to cover the
+         * frame. A lens that quietly returned something plausible outside its
+         * range would be worse than one that will not build. */
+        OsLens bad;
+        CHECK(!os_lens_build(&bad, OS_LENS_ZOOM_RETRO, 200.0, 5.6, why, sizeof why));
+        NOTE("refused at 200 mm: %s", why);
+        CHECK(!os_lens_build(&bad, OS_LENS_ZOOM_RETRO, 24.0, 5.6, why, sizeof why));
+
+        /* The range is reported, so a UI can stop at it rather than walking a
+         * control past a build that then fails. */
+        ls_real fmin = 0.0, fmax = 0.0;
+        OsLens z;
+        CHECK(os_lens_build(&z, OS_LENS_ZOOM_RETRO, 60.0, 5.6, why, sizeof why));
+        CHECK(os_lens_focal_range_mm(&z, &fmin, &fmax));
+        CHECK_NEAR(fmin, 45.0, 1e-12);
+        CHECK_NEAR(fmax, 100.0, 1e-12);
+        /* And the same answer before anything is built, which is what the
+         * viewer needs when the design is switched. */
+        ls_real dmin = 0.0, dmax = 0.0;
+        CHECK(os_lens_design_focal_range(OS_LENS_ZOOM_RETRO, &dmin, &dmax));
+        CHECK_NEAR(dmin, fmin, 1e-12);
+        CHECK_NEAR(dmax, fmax, 1e-12);
+        /* A design that scales freely reports NO range, so a caller can tell
+         * "unbounded" from "bounded here". */
+        CHECK(!os_lens_design_focal_range(OS_LENS_ACHROMAT_100, &dmin, &dmax));
+        CHECK(!os_lens_focal_range_mm(&a100, &dmin, &dmax));
+    }
+
+    SECTION("lens: distortion, the aberration that blurs nothing");
+    {
+        /* Distortion moves an image point instead of spreading it, which is
+         * why it needs a measurement of its own: it cannot be seen in a spot
+         * diagram, and on a field of round objects it is invisible, because a
+         * blob moved slightly outward is still a blob.
+         *
+         * Measured from the CHIEF ray -- the one through the centre of the
+         * entrance pupil -- against the paraxial image height at the conjugate
+         * the lens is focused at. */
+        char why[256];
+        static const OsPrescriptionId ID[3] = {
+            OS_LENS_THIN, OS_LENS_SINGLET_100, OS_LENS_ACHROMAT_100 };
+        /* Measured, at the image height a 0.75 rad object reaches. */
+        static const double WANT[3] = { -2.106, -2.411, -0.429 };
+
+        for (int k = 0; k < 3; ++k) {
+            OsLens L;
+            CHECK(os_lens_build(&L, ID[k], 100.0, 5.0, why, sizeof why));
+            L.blades = 0;
+            CHECK(os_lens_set_fnumber(&L, 5.0));
+            CHECK(os_lens_focus(&L, 2.0));
+
+            /* Where a 0.75 rad object lands, paraxially. */
+            ls_real s   = 2000.0 - (L.ffd_mm + L.efl_mm);
+            ls_real sp  = 1.0 / (1.0 / L.efl_mm - 1.0 / s);
+            ls_real h   = tan(0.75) * 2000.0 * (sp / s);
+            ls_real got = os_lens_distortion_pct(&L, h);
+
+            NOTE("%-11s %+7.3f %% at h = %.2f mm",
+                 os_prescription_name(ID[k]), got, h);
+            CHECK_NEAR(got, WANT[k], 2e-3);
+            /* Every design here is BARREL. A sign slip would read as
+             * pincushion and look just as plausible on a number. */
+            CHECK(got < 0.0);
+        }
+
+        /* ---- it is zero on axis and grows with height ----
+         *
+         * Not merely nonzero somewhere: distortion is a field aberration, so
+         * it has to vanish on the axis and increase outward. A constant offset
+         * would be a magnification error, which is a different mistake. */
+        OsLens L;
+        CHECK(os_lens_build(&L, OS_LENS_ACHROMAT_100, 100.0, 5.0, why, sizeof why));
+        L.blades = 0;
+        CHECK(os_lens_set_fnumber(&L, 5.0));
+        CHECK(os_lens_focus(&L, 2.0));
+
+        CHECK(os_lens_distortion_pct(&L, 0.0) == 0.0);   /* nowhere to move */
+        CHECK(os_lens_distortion_pct(&L, -5.0) == 0.0);
+
+        ls_real prev = 0.0;
+        for (ls_real h = 25.0; h <= 100.0; h += 25.0) {
+            ls_real d = fabs(os_lens_distortion_pct(&L, h));
+            CHECK(d >= prev - 1e-9);
+            prev = d;
+        }
+        CHECK(prev > 0.3);          /* and it really does get somewhere */
+
+        /* ---- it blurs NOTHING ----
+         *
+         * The claim that makes it a separate row from SPOT. At the focused
+         * distance the defocus blur is exactly zero, and the distortion is
+         * not -- so the two cannot be measurements of the same thing, and no
+         * amount of refocusing turns one into the other. */
+        ls_real hh = 90.0;
+        CHECK_NEAR(os_lens_coc_mm(&L, 2.0), 0.0, 1e-9);
+        CHECK(fabs(os_lens_distortion_pct(&L, hh)) > 0.1);
+
+        /* ---- and it is measured at the CONJUGATE, which is the trap ----
+         *
+         * f*tan(theta) is the paraxial image height for an object at INFINITY.
+         * Using it on a lens focused at 2 m is the mistake this function
+         * exists to make impossible, and it is not a small one: on this design
+         * it reports several per cent of PINCUSHION where there is half a per
+         * cent of barrel -- right magnitude, wrong sign, entirely convincing.
+         *
+         * So: the honest number, and the number the wrong reference gives,
+         * measured side by side at the same field. */
+        ls_real ss  = 2000.0 - (L.ffd_mm + L.efl_mm);
+        ls_real spp = 1.0 / (1.0 / L.efl_mm - 1.0 / ss);
+        ls_real mag = spp / ss;
+        ls_real theta = 0.75;
+        ls_real h_par = tan(theta) * 2000.0 * mag;    /* correct reference   */
+        ls_real h_inf = L.efl_mm * tan(theta);        /* infinity's reference */
+        NOTE("at 0.75 rad the paraxial height is %.2f mm focused at 2 m, but "
+             "%.2f mm at infinity -- a %.0f%% different yardstick",
+             h_par, h_inf, 100.0 * fabs(h_inf / h_par - 1.0));
+        CHECK(fabs(h_inf / h_par - 1.0) > 0.02);      /* they really differ  */
+
+        /* Focused at infinity the answer converges rather than jumping: the
+         * conjugate is a continuum and so is the distortion on it. */
+        ls_real at_2m = os_lens_distortion_pct(&L, 21.63);
+        CHECK(os_lens_focus(&L, 1000.0));
+        ls_real at_1km = os_lens_distortion_pct(&L, 21.63);
+        CHECK(os_lens_focus(&L, HUGE_VAL));
+        ls_real at_inf = os_lens_distortion_pct(&L, 21.63);
+        NOTE("the same 21.63 mm corner: %+.3f %% at 2 m, %+.3f %% at 1 km, "
+             "%+.3f %% at infinity", at_2m, at_1km, at_inf);
+        CHECK(isfinite(at_inf));
+        /* 1 km is nearly infinity, and must read nearly the same. An earlier
+         * version faked infinity with a 1e9 mm object and lost fourteen digits
+         * to cancellation in the sphere intersection; it reported +3 % here,
+         * off by a hundred times and by a sign. */
+        CHECK(fabs(at_1km - at_inf) < 0.01);
+    }
+
+    SECTION("lens: the entrance pupil of a stop behind the front element");
+    {
+        /* THE branch nothing shipped reaches, and it was wrong.
+         *
+         * Every prescription here puts the stop on surface 0, so
+         * entrance_pupil short-circuits -- the stop IS the entrance pupil, and
+         * the backward y-nu walk that images it through the glass in front is
+         * never called. It negated the radius on top of a transfer that was
+         * already in the unmirrored frame, which flipped the sign of the
+         * curvature term, and no test could see it. A double Gauss would have
+         * shipped with its f-number wrong by ten per cent.
+         *
+         * So: move the ideal design's stop to its SECOND surface and ask for
+         * the pupil. That images a plane 20 mm inside n = 2 back out through
+         * the R = +100 entry surface into air, which the single-surface
+         * conjugate equation answers in closed form:
+         *
+         *     n'/s' - n/s = (n' - n)/R      with the ray going -z, so mirror:
+         *     1/s' - 2/(-20) = (1 - 2)/(-100)  =>  s' = -100/9
+         *     m = (n s')/(n' s) = (2 * -100/9)/(1 * -20) = 10/9
+         *
+         * The image lands 100/9 mm on the far side of the vertex from the
+         * stop -- a VIRTUAL pupil, in front of the glass, which is the usual
+         * arrangement and exactly the case a sign error survives in, because
+         * the wrong answer is also a plausible-looking pupil. */
+        OsLens L;
+        CHECK(os_lens_build(&L, OS_LENS_THIN, 0.0, 0.0, why, sizeof why));
+        L.stop_index = 1;
+        CHECK(os_lens_set_fnumber(&L, 4.0));
+
+        NOTE("stop on surface 1: pupil at z = %.6f mm, magnification %.6f",
+             L.ep_z_mm, L.ep_mag);
+        CHECK_NEAR(L.ep_z_mm, 100.0 / 9.0, 1e-9);
+        CHECK_NEAR(L.ep_mag, 10.0 / 9.0, 1e-9);
+
+        /* And the pupil's SIZE follows the magnification, which is the number
+         * the f-number is computed from -- getting the sign wrong here does
+         * not produce an error, it produces a lens that passes a different
+         * amount of light than it claims. */
+        CHECK_NEAR(L.ep_semi_ap_mm, L.stop_semi_ap_mm * 10.0 / 9.0, 1e-9);
     }
 
     SECTION("lens: the thin-lens limit is exactly 100 mm");
